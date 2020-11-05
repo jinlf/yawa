@@ -3,6 +3,8 @@ use crate::execution;
 use crate::module;
 use crate::parser::*;
 use crate::structure;
+use std::cell::*;
+use std::rc::*;
 
 //7.1.2 Errors
 #[derive(Debug)]
@@ -28,7 +30,7 @@ impl From<execution::Error> for Error {
 }
 
 //7.1.4
-pub fn store_init() -> execution::Store {
+pub fn store_init() -> Rc<RefCell<execution::Store>> {
     execution::Store::new()
 }
 //7.1.5

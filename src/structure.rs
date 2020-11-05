@@ -17,28 +17,28 @@ pub struct FuncType {
     pub results: ResultType,
 }
 //2.3.4 Limits
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Limits {
     pub min: u32,
     pub max: Option<u32>,
 }
 //2.3.5 Memory Types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MemType {
     pub limits: Limits,
 }
 //2.3.6 Table Types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableType {
     pub limits: Limits,
     pub elemtype: ElemType,
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ElemType {
     FuncRef,
 }
 //2.3.7 Global Types
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct GlobalType {
     pub r#mut: Mut,
     pub valtype: ValType,
@@ -49,6 +49,7 @@ pub enum Mut {
     Var,
 }
 //2.3.8 External Types
+#[derive(Clone)]
 pub enum ExternType {
     func(FuncType),
     table(TableType),

@@ -130,11 +130,18 @@ fn decode_exportsec(input: &mut Cursor<&[u8]>) -> Result<Vec<Export>, Error> {
     decode_sec::<Export>(input, 0x07)
 }
 fn decode_startsec(input: &mut Cursor<&[u8]>) -> Result<Option<Start>, Error> {
-    let mut start = decode_sec::<Start>(input, 0x08)?;
-    match start.len() {
-        0 | 1 => Ok(start.pop()),
-        _ => Err(Error::DecodeError),
+    let pos = input.position();
+    let section_id = leb128::read_unsigned(input, 32)? as u32;
+    if section_id != 0x08 {
+        input.set_position(pos);
+        return Ok(None);
     }
+    let size = leb128::read_unsigned(input, 32)? as u32;
+    let mut buf = vec![0_u8; size as usize];
+    input.read_exact(&mut buf)?;
+    let mut cont = Cursor::new(&buf[..]);
+    let start = decode_start(&mut cont)?;
+    Ok(Some(start))
 }
 fn decode_elemsec(input: &mut Cursor<&[u8]>) -> Result<Vec<Elem>, Error> {
     decode_sec::<Elem>(input, 0x09)
