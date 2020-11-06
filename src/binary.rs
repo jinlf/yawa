@@ -9,6 +9,7 @@ pub enum Error {
     IoError(std::io::Error),
     Leb128Error(leb128::Error),
     Utf8Error(std::string::FromUtf8Error),
+    NotImplemented(u8),
 }
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
@@ -315,10 +316,50 @@ fn decode_instr(input: &mut Cursor<&[u8]>) -> Result<Instr, Error> {
         0x1A => Ok(Instr::drop),
         //5.4.3 Variable Instructions
         0x20 => Ok(Instr::local_get(decode_localidx(input)?)),
+        //5.4.4 Memory Instructions
+        0x28 => Ok(Instr::i32_load(decode_memarg(input)?)),
+        0x29 => Ok(Instr::i64_load(decode_memarg(input)?)),
+        0x2A => Ok(Instr::f32_load(decode_memarg(input)?)),
+        0x2B => Ok(Instr::f64_load(decode_memarg(input)?)),
+        0x2C => Ok(Instr::i32_load8_s(decode_memarg(input)?)),
+        0x2D => Ok(Instr::i32_load8_u(decode_memarg(input)?)),
+        0x2E => Ok(Instr::i32_load16_s(decode_memarg(input)?)),
+        0x2F => Ok(Instr::i32_load16_u(decode_memarg(input)?)),
+        0x30 => Ok(Instr::i64_load8_s(decode_memarg(input)?)),
+        0x31 => Ok(Instr::i64_load8_u(decode_memarg(input)?)),
+        0x32 => Ok(Instr::i64_load16_s(decode_memarg(input)?)),
+        0x33 => Ok(Instr::i64_load16_u(decode_memarg(input)?)),
+        0x34 => Ok(Instr::i64_load32_s(decode_memarg(input)?)),
+        0x35 => Ok(Instr::i64_load32_u(decode_memarg(input)?)),
+        0x36 => Ok(Instr::i32_store(decode_memarg(input)?)),
+        0x37 => Ok(Instr::i64_store(decode_memarg(input)?)),
+        0x38 => Ok(Instr::f32_store(decode_memarg(input)?)),
+        0x39 => Ok(Instr::f64_store(decode_memarg(input)?)),
+        0x3A => Ok(Instr::i32_store8(decode_memarg(input)?)),
+        0x3B => Ok(Instr::i32_store16(decode_memarg(input)?)),
+        0x3C => Ok(Instr::i64_store8(decode_memarg(input)?)),
+        0x3D => Ok(Instr::i64_store16(decode_memarg(input)?)),
+        0x3E => Ok(Instr::i64_store32(decode_memarg(input)?)),
+        0x3F => {
+            assert_eq!(decode_byte(input)?, 0);
+            Ok(Instr::memory_size)
+        }
+        0x40 => {
+            assert_eq!(decode_byte(input)?, 0);
+            Ok(Instr::memory_grow)
+        }
         //5.4.5 Numeric Instructions
         0x41 => Ok(Instr::i32_const(decode_i32(input)?)),
-        _ => todo!(),
+        _ => Err(Error::NotImplemented(byte)),
     }
+}
+fn decode_memarg(input: &mut Cursor<&[u8]>) -> Result<MemArg, Error> {
+    let align = leb128::read_unsigned(input, 32)? as u32;
+    let offset = leb128::read_unsigned(input, 32)? as u32;
+    Ok(MemArg {
+        offset: offset,
+        align: align,
+    })
 }
 fn decode_i32(input: &mut Cursor<&[u8]>) -> Result<i32, Error> {
     Ok(leb128::read_signed(input, 32)? as i32)

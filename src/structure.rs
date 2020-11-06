@@ -262,7 +262,7 @@ pub enum Instr {
     //inn.store16 memarg
     i32_store16(MemArg),
     i64_store16(MemArg),
-    i64_store2(MemArg),
+    i64_store32(MemArg),
     memory_size,
     memory_grow,
 

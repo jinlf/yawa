@@ -2,6 +2,8 @@ use crate::structure;
 use crate::validation;
 use libc;
 use std::cell::*;
+use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::fmt::Debug;
 use std::rc::*;
 
@@ -9,10 +11,17 @@ use std::rc::*;
 pub enum Error {
     ExecuteError,
     ValidateError(validation::Error),
+    NotImplemented(Instr),
+    TryFromSliceError(std::array::TryFromSliceError),
 }
 impl From<validation::Error> for Error {
     fn from(e: validation::Error) -> Self {
         Self::ValidateError(e)
+    }
+}
+impl From<std::array::TryFromSliceError> for Error {
+    fn from(e: std::array::TryFromSliceError) -> Self {
+        Self::TryFromSliceError(e)
     }
 }
 
@@ -258,16 +267,16 @@ pub struct Thread {
     pub frame: Rc<RefCell<Frame>>,
     stack: Stack,
 }
-fn reduce_to_end(config: &mut Config, instrs: &mut Vec<Instr>) {
+fn reduce_to_end(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<(), Error> {
     loop {
-        if reduce(config, instrs) == false {
-            return;
+        if reduce(config, instrs)? == false {
+            return Ok(());
         }
     }
 }
-fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
+fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
     if instrs.len() == 0 {
-        return false;
+        return Ok(false);
     }
     println!("instrs=>{:#?}", instrs);
     let instr = instrs.remove(0);
@@ -283,6 +292,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                             vals.insert(0, val);
                         }
                         Some(Entry::label(_)) => {
+                            //4.4.6 Blocks
                             // Exiting instr* with label L
                             //1
                             let m = vals.len();
@@ -291,7 +301,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                             for _ in 0..m {
                                 config.thread.stack.push(Entry::val(vals.remove(0)));
                             }
-                            return true;
+                            return Ok(true);
                         }
                         Some(Entry::activation(activation)) => {
                             // Returning from a function
@@ -307,43 +317,59 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                             for _ in 0..vals.len() {
                                 config.thread.stack.push(Entry::val(vals.remove(0)));
                             }
-                            return true;
+                            return Ok(true);
                         }
                         _ => {
                             instrs.insert(0, Instr::trap);
-                            return true;
+                            return Ok(true);
                         }
                     }
                 }
             }
-            structure::Instr::drop => {
-                let entry = config.thread.stack.pop();
-                return true;
-            }
+            //4.4.1 Numeric Instructions
             structure::Instr::i32_const(v) => {
                 config.thread.stack.push(Entry::val(Val::i32_const(v)));
-                return true;
+                return Ok(true);
             }
+
+            //4.4.2 Parametric Instructions
+            structure::Instr::drop => {
+                let entry = config.thread.stack.pop();
+                return Ok(true);
+            }
+            //4.4.3 Variable Instructions
             structure::Instr::local_get(x) => {
                 //1
                 //2
                 //3
                 let val = config.thread.frame.borrow().locals[x as usize].clone();
                 config.thread.stack.push(Entry::val(val));
-                return true;
+                return Ok(true);
             }
+            //4.4.4 Memory Instructions
+            structure::Instr::i32_load8_u(memarg) => {
+                match load_N_sx(
+                    structure::ValType::r#i32,
+                    Some((8, false)),
+                    memarg,
+                    config,
+                    instrs,
+                )? {
+                    Val::i32_const(c) => config.thread.stack.push(Entry::val(Val::i32_const(c))),
+                    _ => return Err(Error::ExecuteError),
+                }
+                return Ok(true);
+            }
+            //4.4.5 Control Instructions
             structure::Instr::call(x) => {
                 let a = config.thread.frame.borrow().module.borrow().funcaddrs[x as usize];
                 instrs.insert(0, Instr::invoke(a));
-                return true;
+                return Ok(true);
             }
-
-            _ => {
-                println!("unsupported instr: {:#?}", instrs[0]);
-                return false;
-            }
+            _ => return Err(Error::NotImplemented(Instr::instr(instr))),
         },
         Instr::invoke(a) => {
+            //4.4.7 Function Calls
             //1
             //2
             let f = &config.store.borrow().funcs[a as usize];
@@ -371,7 +397,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                             }
                             _ => {
                                 instrs.insert(0, Instr::trap);
-                                return true;
+                                return Ok(true);
                             }
                         }
                     }
@@ -418,7 +444,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                     //12
                     instrs.push(Instr::instr(structure::Instr::end));
                     instrs.push(Instr::instr(structure::Instr::end));
-                    return true;
+                    return Ok(true);
                 }
                 FuncInst::hostfunc { r#type, hostcode } => {
                     let structure::FuncType { params, results } = r#type;
@@ -433,7 +459,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                             }
                             _ => {
                                 instrs.insert(0, Instr::trap);
-                                return true;
+                                return Ok(true);
                             }
                         }
                     }
@@ -450,17 +476,194 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> bool {
                         }
                         Err(_) => {
                             instrs.insert(0, Instr::trap);
-                            return true;
+                            return Ok(true);
                         }
                     }
-                    return true;
+                    return Ok(true);
                 }
             };
         }
-        _ => {
-            println!("instr: {:#?}", instr);
-            todo!();
+        _ => return Err(Error::NotImplemented(instr)),
+    }
+}
+fn load_N_sx(
+    t: structure::ValType,
+    N_sx: Option<(usize, bool)>,
+    memarg: structure::MemArg,
+    config: &mut Config,
+    instrs: &mut Vec<Instr>,
+) -> Result<Val, Error> {
+    //1
+    let F = Rc::clone(&config.thread.frame);
+    //2
+    //3
+    let a = F.borrow().module.borrow().memaddrs[0];
+    //4
+    //5
+    let mem = &config.store.borrow().mems[a];
+    //6
+    //7
+    let i = match config.thread.stack.pop() {
+        Some(Entry::val(Val::i32_const(i))) => i,
+        _ => return Err(Error::ExecuteError),
+    };
+    //8
+    let ea = (i + memarg.offset as i32) as usize;
+    //9
+    let N = match N_sx {
+        Some((n, _)) => n,
+        _ => match t {
+            structure::ValType::r#i32 => 32,
+            structure::ValType::r#i64 => 64,
+            structure::ValType::r#f32 => 32,
+            structure::ValType::r#f64 => 64,
+        }, //9.a
+    };
+    //10
+    if (ea + N / 8) > mem.data.len() {
+        instrs.insert(0, Instr::trap);
+        return match t {
+            structure::ValType::r#i32 => Ok(Val::i32_const(0)),
+            structure::ValType::r#i64 => Ok(Val::i64_const(0)),
+            structure::ValType::r#f32 => Ok(Val::f32_const(0.0)),
+            structure::ValType::r#f64 => Ok(Val::f64_const(0.0)),
+        };
+    }
+    //11
+    let b = &mem.data[ea..(ea + N / 8)];
+    //12
+    match N_sx {
+        Some((N, sx)) => {
+            let n = ibits_N(N, b)?;
+            let c = extend_sx_N_t(N, sx, t, n)?;
+            Ok(c)
         }
+        _ => {
+            let c = match t {
+                structure::ValType::r#i32 => Val::i32_const(i32::from_le_bytes(b.try_into()?)),
+                structure::ValType::r#i64 => Val::i64_const(i64::from_le_bytes(b.try_into()?)),
+                structure::ValType::r#f32 => Val::f32_const(f32::from_le_bytes(b.try_into()?)),
+                structure::ValType::r#f64 => Val::f64_const(f64::from_le_bytes(b.try_into()?)),
+            };
+            Ok(c)
+        }
+    }
+}
+fn extend_sx_N_t(N: usize, sx: bool, t: structure::ValType, n: Integer) -> Result<Val, Error> {
+    match N {
+        8 => {
+            if sx {
+                match t {
+                    structure::ValType::r#i32 => match n {
+                        // i32.load8_s
+                        Integer::b8(buf) => Ok(Val::i32_const(i8::from_le_bytes(buf) as i32)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    structure::ValType::r#i64 => match n {
+                        // i64.load8_s
+                        Integer::b8(buf) => Ok(Val::i64_const(i8::from_le_bytes(buf) as i64)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    _ => Err(Error::ExecuteError),
+                }
+            } else {
+                match t {
+                    structure::ValType::r#i32 => match n {
+                        // i32.load8_u
+                        Integer::b8(buf) => Ok(Val::i32_const(u8::from_le_bytes(buf) as i32)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    structure::ValType::r#i64 => match n {
+                        // i64.load8_u
+                        Integer::b8(buf) => Ok(Val::i64_const(u8::from_le_bytes(buf) as i64)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    _ => Err(Error::ExecuteError),
+                }
+            }
+        }
+        16 => {
+            if sx {
+                match t {
+                    structure::ValType::r#i32 => match n {
+                        // i32.load16_s
+                        Integer::b16(buf) => Ok(Val::i32_const(i16::from_le_bytes(buf) as i32)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    structure::ValType::r#i64 => match n {
+                        // i64.load16_s
+                        Integer::b16(buf) => Ok(Val::i64_const(i16::from_le_bytes(buf) as i64)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    _ => Err(Error::ExecuteError),
+                }
+            } else {
+                match t {
+                    structure::ValType::r#i32 => match n {
+                        // i32.load16_u
+                        Integer::b16(buf) => Ok(Val::i32_const(u16::from_le_bytes(buf) as i32)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    structure::ValType::r#i64 => match n {
+                        // i64.load16_u
+                        Integer::b16(buf) => Ok(Val::i64_const(u16::from_le_bytes(buf) as i64)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    _ => Err(Error::ExecuteError),
+                }
+            }
+        }
+        32 => {
+            if sx {
+                match t {
+                    structure::ValType::r#i64 => match n {
+                        // i64.load32_s
+                        Integer::b32(buf) => Ok(Val::i64_const(i32::from_le_bytes(buf) as i64)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    _ => Err(Error::ExecuteError),
+                }
+            } else {
+                match t {
+                    structure::ValType::r#i64 => match n {
+                        // i64.load32_u
+                        Integer::b32(buf) => Ok(Val::i64_const(u32::from_le_bytes(buf) as i64)),
+                        _ => Err(Error::ExecuteError),
+                    },
+                    _ => Err(Error::ExecuteError),
+                }
+            }
+        }
+        _ => Err(Error::ExecuteError),
+    }
+}
+enum Integer {
+    b8([u8; 1]),
+    b16([u8; 2]),
+    b32([u8; 4]),
+    b64([u8; 8]),
+}
+fn ibits_N(N: usize, b: &[u8]) -> Result<Integer, Error> {
+    //todo littleendian
+    match N {
+        8 => Ok(Integer::b8(b.try_into()?)),
+        16 => Ok(Integer::b16(b.try_into()?)),
+        32 => Ok(Integer::b32(b.try_into()?)),
+        64 => Ok(Integer::b64(b.try_into()?)),
+        _ => Err(Error::ExecuteError),
+    }
+}
+fn fbits_N(N: usize, b: &[u8]) -> Result<Val, Error> {
+    match N {
+        32 => {
+            assert!(b.len() >= 4);
+            Ok(Val::f32_const(f32::from_le_bytes(b.try_into()?)))
+        }
+        64 => {
+            assert!(b.len() >= 8);
+            Ok(Val::f64_const(f64::from_le_bytes(b.try_into()?)))
+        }
+        _ => Err(Error::ExecuteError),
     }
 }
 
@@ -488,9 +691,9 @@ fn extend_u64_s32(i: u64) -> i32 {
     i as i32
 }
 
-//4.4.8
+//4.4.8 Expressions
 fn evalute(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<Val, Error> {
-    reduce_to_end(config, instrs);
+    reduce_to_end(config, instrs)?;
     let entry = config.thread.stack.pop();
     match entry {
         Some(Entry::val(val)) => Ok(val),
@@ -1045,7 +1248,7 @@ fn instantiate(
         let funcaddr = moduleinst.borrow().funcaddrs[func as usize];
         //15.
         let mut instrs = vec![Instr::invoke(funcaddr)];
-        reduce_to_end(&mut config, &mut instrs);
+        reduce_to_end(&mut config, &mut instrs)?;
 
         let funcinst = &config.store.borrow().funcs[funcaddr as usize];
         let functype = match funcinst {
@@ -1146,7 +1349,7 @@ fn invoke(
     }
     //9
     let mut instrs = vec![Instr::invoke(funcaddr)];
-    reduce_to_end(&mut config, &mut instrs);
+    reduce_to_end(&mut config, &mut instrs)?;
 
     //1
     //2
@@ -1196,50 +1399,141 @@ mod tests {
     use super::*;
     use std::io::Read;
 
-    #[test]
-    fn test_module_instantiate() {
-        let mut f = std::fs::File::open("resources/test.wasm").unwrap();
-        let mut v = Vec::new();
-        f.read_to_end(&mut v).unwrap();
-        let module = crate::module_decode(v).unwrap();
-        let mut S = crate::store_init();
-
-        // host func
-        let mut funcaddrs: Vec<FuncAddr> = vec![];
-        for i in 0..module.imports.len() {
-            let import = &module.imports[i];
-            match import.desc {
-                structure::ImportDesc::func(typeidx) => {
-                    let functype = &module.types[typeidx as usize];
-                    let funcaddr = allochostfunc(Rc::clone(&S), &functype, i);
-                    funcaddrs.push(funcaddr);
-                }
-                _ => {}
-            }
-        }
-
-        let (F, vals) = instantiate(Rc::clone(&S), &module, vec![ExternVal::func(0)]).unwrap();
-        assert_eq!(vals.len(), 0);
-        let module = &F.borrow().module;
-        let exports = &module.borrow().exports;
-        let func = exports
+    fn assert_return(
+        store: Rc<RefCell<Store>>,
+        moduleinst: Rc<RefCell<ModuleInst>>,
+        name: &str,
+        input: Val,
+        output: Val,
+    ) {
+        let m = moduleinst.borrow();
+        let exportinst = m
+            .exports
             .iter()
-            .find(|exportinst| exportinst.name == "main")
+            .find(|exportinst| exportinst.name == name)
             .unwrap();
-        match func.value {
+        match exportinst.value {
             ExternVal::func(funcaddr) => {
                 let (_, vals) = invoke(
-                    Rc::clone(&S),
-                    Rc::clone(&F.borrow().module),
+                    Rc::clone(&store),
+                    Rc::clone(&moduleinst),
                     funcaddr,
-                    vec![Val::i32_const(0), Val::i32_const(0)],
+                    vec![input],
                 )
                 .unwrap();
-                println!("vals=>{:#?}", vals);
                 assert_eq!(vals.len(), 1);
-                assert_eq!(vals[0], Val::i32_const(0));
+                assert_eq!(vals[0], output);
             }
             _ => assert!(false),
         }
+    }
+
+    #[test]
+    fn test_module_instantiate() {
+        let mut f = std::fs::File::open("resources/address.wasm").unwrap();
+        let mut v = Vec::new();
+        f.read_to_end(&mut v).unwrap();
+        let module = crate::module_decode(v).unwrap();
+        let S = crate::store_init();
+        let (F, _) = instantiate(Rc::clone(&S), &module, vec![]).unwrap();
+        assert_return(
+            Rc::clone(&S),
+            Rc::clone(&F.borrow().module),
+            "8u_good1",
+            Val::i32_const(0),
+            Val::i32_const(97),
+        );
+
+        // (assert_return (invoke "8u_good1" (i32.const 0)) (i32.const 97))
+        // (assert_return (invoke "8u_good2" (i32.const 0)) (i32.const 97))
+        // (assert_return (invoke "8u_good3" (i32.const 0)) (i32.const 98))
+        // (assert_return (invoke "8u_good4" (i32.const 0)) (i32.const 99))
+        // (assert_return (invoke "8u_good5" (i32.const 0)) (i32.const 122))
+        // (assert_return (invoke "8s_good1" (i32.const 0)) (i32.const 97))
+        // (assert_return (invoke "8s_good2" (i32.const 0)) (i32.const 97))
+        // (assert_return (invoke "8s_good3" (i32.const 0)) (i32.const 98))
+        // (assert_return (invoke "8s_good4" (i32.const 0)) (i32.const 99))
+        // (assert_return (invoke "8s_good5" (i32.const 0)) (i32.const 122))
+        // (assert_return (invoke "16u_good1" (i32.const 0)) (i32.const 25185))
+        // (assert_return (invoke "16u_good2" (i32.const 0)) (i32.const 25185))
+        // (assert_return (invoke "16u_good3" (i32.const 0)) (i32.const 25442))
+        // (assert_return (invoke "16u_good4" (i32.const 0)) (i32.const 25699))
+        // (assert_return (invoke "16u_good5" (i32.const 0)) (i32.const 122))
+        // (assert_return (invoke "16s_good1" (i32.const 0)) (i32.const 25185))
+        // (assert_return (invoke "16s_good2" (i32.const 0)) (i32.const 25185))
+        // (assert_return (invoke "16s_good3" (i32.const 0)) (i32.const 25442))
+        // (assert_return (invoke "16s_good4" (i32.const 0)) (i32.const 25699))
+        // (assert_return (invoke "16s_good5" (i32.const 0)) (i32.const 122))
+        // (assert_return (invoke "32_good1" (i32.const 0)) (i32.const 1684234849))
+        // (assert_return (invoke "32_good2" (i32.const 0)) (i32.const 1684234849))
+        // (assert_return (invoke "32_good3" (i32.const 0)) (i32.const 1701077858))
+        // (assert_return (invoke "32_good4" (i32.const 0)) (i32.const 1717920867))
+        // (assert_return (invoke "32_good5" (i32.const 0)) (i32.const 122))
+        // (assert_return (invoke "8u_good1" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8u_good2" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8u_good3" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8u_good4" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8u_good5" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8s_good1" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8s_good2" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8s_good3" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8s_good4" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8s_good5" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16u_good1" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16u_good2" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16u_good3" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16u_good4" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16u_good5" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16s_good1" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16s_good2" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16s_good3" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16s_good4" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "16s_good5" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "32_good1" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "32_good2" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "32_good3" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "32_good4" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "32_good5" (i32.const 65507)) (i32.const 0))
+        // (assert_return (invoke "8u_good1" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8u_good2" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8u_good3" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8u_good4" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8u_good5" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8s_good1" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8s_good2" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8s_good3" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8s_good4" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "8s_good5" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16u_good1" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16u_good2" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16u_good3" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16u_good4" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16u_good5" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16s_good1" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16s_good2" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16s_good3" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16s_good4" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "16s_good5" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "32_good1" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "32_good2" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "32_good3" (i32.const 65508)) (i32.const 0))
+        // (assert_return (invoke "32_good4" (i32.const 65508)) (i32.const 0))
+        // (assert_trap (invoke "32_good5" (i32.const 65508)) "out of bounds memory access")
+        // (assert_trap (invoke "8u_good3" (i32.const -1)) "out of bounds memory access")
+        // (assert_trap (invoke "8s_good3" (i32.const -1)) "out of bounds memory access")
+        // (assert_trap (invoke "16u_good3" (i32.const -1)) "out of bounds memory access")
+        // (assert_trap (invoke "16s_good3" (i32.const -1)) "out of bounds memory access")
+        // (assert_trap (invoke "32_good3" (i32.const -1)) "out of bounds memory access")
+        // (assert_trap (invoke "32_good3" (i32.const -1)) "out of bounds memory access")
+        // (assert_trap (invoke "8u_bad" (i32.const 0)) "out of bounds memory access")
+        // (assert_trap (invoke "8s_bad" (i32.const 0)) "out of bounds memory access")
+        // (assert_trap (invoke "16u_bad" (i32.const 0)) "out of bounds memory access")
+        // (assert_trap (invoke "16s_bad" (i32.const 0)) "out of bounds memory access")
+        // (assert_trap (invoke "32_bad" (i32.const 0)) "out of bounds memory access")
+        // (assert_trap (invoke "8u_bad" (i32.const 1)) "out of bounds memory access")
+        // (assert_trap (invoke "8s_bad" (i32.const 1)) "out of bounds memory access")
+        // (assert_trap (invoke "16u_bad" (i32.const 1)) "out of bounds memory access")
+        // (assert_trap (invoke "16s_bad" (i32.const 1)) "out of bounds memory access")
+        // (assert_trap (invoke "32_bad" (i32.const 1)) "out of bounds memory access")
     }
 }
