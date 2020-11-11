@@ -474,7 +474,7 @@ mod tests {
     use super::*;
     use std::fs::*;
     use std::io::Read;
-    #[test]
+    // #[test]
     fn lex_test() {
         if let Ok(entries) = read_dir("testsuite") {
             for entry in entries {

@@ -2,10 +2,66 @@ use crate::structure;
 use crate::validation;
 use libc;
 use std::cell::*;
-use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::rc::*;
+
+macro_rules! process_load_instr {
+    (i32, $memarg:ident, $config:ident, $instrs:ident) => {{
+        match load_N_sx(structure::ValType::r#i32, None, $memarg, $config, $instrs)? {
+            Val::i32_const(c) => $config.thread.stack.push(Entry::val(Val::i32_const(c))),
+            _ => return Err(Error::ExecuteError),
+        }
+        return Ok(true);
+    }};
+    (i64, $memarg:ident, $config:ident, $instrs:ident) => {{
+        match load_N_sx(structure::ValType::r#i64, None, $memarg, $config, $instrs)? {
+            Val::i64_const(c) => $config.thread.stack.push(Entry::val(Val::i64_const(c))),
+            _ => return Err(Error::ExecuteError),
+        }
+        return Ok(true);
+    }};
+    (f32, $memarg:ident, $config:ident, $instrs:ident) => {{
+        match load_N_sx(structure::ValType::r#f32, None, $memarg, $config, $instrs)? {
+            Val::f32_const(c) => $config.thread.stack.push(Entry::val(Val::f32_const(c))),
+            _ => return Err(Error::ExecuteError),
+        }
+        return Ok(true);
+    }};
+    (f64, $memarg:ident, $config:ident, $instrs:ident) => {{
+        match load_N_sx(structure::ValType::r#f64, None, $memarg, $config, $instrs)? {
+            Val::f64_const(c) => $config.thread.stack.push(Entry::val(Val::f64_const(c))),
+            _ => return Err(Error::ExecuteError),
+        }
+        return Ok(true);
+    }};
+    (i32, $e: expr, $s: expr, $memarg:ident, $config:ident, $instrs:ident) => {{
+        match load_N_sx(
+            structure::ValType::r#i32,
+            Some(($e, $s)),
+            $memarg,
+            $config,
+            $instrs,
+        )? {
+            Val::i32_const(c) => $config.thread.stack.push(Entry::val(Val::i32_const(c))),
+            _ => return Err(Error::ExecuteError),
+        }
+        return Ok(true);
+    }};
+    (i64, $e: expr, $s: expr, $memarg:ident, $config:ident, $instrs:ident) => {{
+        match load_N_sx(
+            structure::ValType::r#i64,
+            Some(($e, $s)),
+            $memarg,
+            $config,
+            $instrs,
+        )? {
+            Val::i64_const(c) => $config.thread.stack.push(Entry::val(Val::i64_const(c))),
+            _ => return Err(Error::ExecuteError),
+        }
+        return Ok(true);
+    }};
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -13,6 +69,7 @@ pub enum Error {
     ValidateError(validation::Error),
     NotImplemented(Instr),
     TryFromSliceError(std::array::TryFromSliceError),
+    TrapError(String),
 }
 impl From<validation::Error> for Error {
     fn from(e: validation::Error) -> Self {
@@ -72,7 +129,7 @@ pub type MemAddr = Addr;
 pub type GlobalAddr = Addr;
 
 //4.2.5
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ModuleInst {
     pub types: Vec<structure::FuncType>,
     pub funcaddrs: Vec<FuncAddr>,
@@ -80,6 +137,18 @@ pub struct ModuleInst {
     pub memaddrs: Vec<MemAddr>,
     pub globaladdrs: Vec<GlobalAddr>,
     pub exports: Vec<ExportInst>,
+}
+impl ModuleInst {
+    pub fn new() -> Self {
+        Self {
+            types: vec![],
+            funcaddrs: vec![],
+            tableaddrs: vec![],
+            memaddrs: vec![],
+            globaladdrs: vec![],
+            exports: vec![],
+        }
+    }
 }
 
 //4.2.6
@@ -126,8 +195,8 @@ pub struct GlobalInst {
 //4.2.10
 #[derive(Debug)]
 pub struct ExportInst {
-    name: structure::Name,
-    value: ExternVal,
+    pub name: structure::Name,
+    pub value: ExternVal,
 }
 
 //4.2.11
@@ -214,6 +283,14 @@ pub struct Frame {
     pub locals: Vec<Val>,
     pub module: Rc<RefCell<ModuleInst>>,
 }
+impl Frame {
+    fn new(module: Rc<RefCell<ModuleInst>>) -> Self {
+        Self {
+            locals: vec![],
+            module: Rc::clone(&module),
+        }
+    }
+}
 impl PartialEq for Frame {
     fn eq(&self, other: &Self) -> bool {
         self.locals == other.locals //TODO
@@ -236,7 +313,7 @@ fn expand_valtypes(
 #[derive(Clone, Debug)]
 pub enum Instr {
     instr(structure::Instr),
-    trap,
+    trap(String),
     invoke(FuncAddr),
     init_elem {
         tableaddr: TableAddr,
@@ -263,9 +340,25 @@ pub struct Config {
     store: Rc<RefCell<Store>>,
     thread: Thread,
 }
+impl Config {
+    pub fn new(store: Rc<RefCell<Store>>, moduleinst: Rc<RefCell<ModuleInst>>) -> Self {
+        Self {
+            store: Rc::clone(&store),
+            thread: Thread::new(Rc::new(RefCell::new(Frame::new(Rc::clone(&moduleinst))))),
+        }
+    }
+}
 pub struct Thread {
     pub frame: Rc<RefCell<Frame>>,
     stack: Stack,
+}
+impl Thread {
+    fn new(frame: Rc<RefCell<Frame>>) -> Self {
+        Self {
+            frame: Rc::clone(&frame),
+            stack: Stack::new(),
+        }
+    }
 }
 fn reduce_to_end(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<(), Error> {
     loop {
@@ -278,9 +371,9 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
     if instrs.len() == 0 {
         return Ok(false);
     }
-    println!("instrs=>{:#?}", instrs);
     let instr = instrs.remove(0);
     match instr {
+        Instr::trap(msg) => Err(Error::TrapError(msg)),
         Instr::instr(instr) => match instr {
             structure::Instr::end => {
                 let mut vals: Vec<Val> = vec![];
@@ -320,7 +413,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                             return Ok(true);
                         }
                         _ => {
-                            instrs.insert(0, Instr::trap);
+                            instrs.insert(0, Instr::trap(String::from("Unknown")));
                             return Ok(true);
                         }
                     }
@@ -347,18 +440,40 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                 return Ok(true);
             }
             //4.4.4 Memory Instructions
+            structure::Instr::i32_load(memarg) => process_load_instr!(i32, memarg, config, instrs),
+            structure::Instr::i64_load(memarg) => process_load_instr!(i64, memarg, config, instrs),
+            structure::Instr::f32_load(memarg) => process_load_instr!(f32, memarg, config, instrs),
+            structure::Instr::f64_load(memarg) => process_load_instr!(f64, memarg, config, instrs),
+            structure::Instr::i32_load8_s(memarg) => {
+                process_load_instr!(i32, 8, true, memarg, config, instrs)
+            }
             structure::Instr::i32_load8_u(memarg) => {
-                match load_N_sx(
-                    structure::ValType::r#i32,
-                    Some((8, false)),
-                    memarg,
-                    config,
-                    instrs,
-                )? {
-                    Val::i32_const(c) => config.thread.stack.push(Entry::val(Val::i32_const(c))),
-                    _ => return Err(Error::ExecuteError),
-                }
-                return Ok(true);
+                process_load_instr!(i32, 8, false, memarg, config, instrs)
+            }
+            structure::Instr::i32_load16_s(memarg) => {
+                process_load_instr!(i32, 16, true, memarg, config, instrs)
+            }
+            structure::Instr::i32_load16_u(memarg) => {
+                process_load_instr!(i32, 16, false, memarg, config, instrs)
+            }
+
+            structure::Instr::i64_load8_s(memarg) => {
+                process_load_instr!(i64, 8, true, memarg, config, instrs)
+            }
+            structure::Instr::i64_load8_u(memarg) => {
+                process_load_instr!(i64, 8, false, memarg, config, instrs)
+            }
+            structure::Instr::i64_load16_s(memarg) => {
+                process_load_instr!(i64, 16, true, memarg, config, instrs)
+            }
+            structure::Instr::i64_load16_u(memarg) => {
+                process_load_instr!(i64, 16, false, memarg, config, instrs)
+            }
+            structure::Instr::i64_load32_s(memarg) => {
+                process_load_instr!(i64, 32, true, memarg, config, instrs)
+            }
+            structure::Instr::i64_load32_u(memarg) => {
+                process_load_instr!(i64, 32, false, memarg, config, instrs)
             }
             //4.4.5 Control Instructions
             structure::Instr::call(x) => {
@@ -396,7 +511,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                                 vals.insert(0, val);
                             }
                             _ => {
-                                instrs.insert(0, Instr::trap);
+                                instrs.insert(0, Instr::trap(String::from("Unknown")));
                                 return Ok(true);
                             }
                         }
@@ -458,7 +573,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                                 vals.insert(0, val);
                             }
                             _ => {
-                                instrs.insert(0, Instr::trap);
+                                instrs.insert(0, Instr::trap(String::from("Unknown")));
                                 return Ok(true);
                             }
                         }
@@ -475,7 +590,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                             }
                         }
                         Err(_) => {
-                            instrs.insert(0, Instr::trap);
+                            instrs.insert(0, Instr::trap(String::from("Unknown")));
                             return Ok(true);
                         }
                     }
@@ -508,7 +623,17 @@ fn load_N_sx(
         _ => return Err(Error::ExecuteError),
     };
     //8
-    let ea = (i + memarg.offset as i32) as usize;
+    let (ea, overflow) = (i as u32).overflowing_add(memarg.offset);
+    if overflow {
+        instrs.insert(0, Instr::trap(String::from("out of bounds memory access")));
+        return match t {
+            structure::ValType::r#i32 => Ok(Val::i32_const(0)),
+            structure::ValType::r#i64 => Ok(Val::i64_const(0)),
+            structure::ValType::r#f32 => Ok(Val::f32_const(0.0)),
+            structure::ValType::r#f64 => Ok(Val::f64_const(0.0)),
+        };
+    }
+    let ea = ea as usize;
     //9
     let N = match N_sx {
         Some((n, _)) => n,
@@ -521,7 +646,7 @@ fn load_N_sx(
     };
     //10
     if (ea + N / 8) > mem.data.len() {
-        instrs.insert(0, Instr::trap);
+        instrs.insert(0, Instr::trap(String::from("out of bounds memory access")));
         return match t {
             structure::ValType::r#i32 => Ok(Val::i32_const(0)),
             structure::ValType::r#i64 => Ok(Val::i64_const(0)),
@@ -692,7 +817,7 @@ fn extend_u64_s32(i: u64) -> i32 {
 }
 
 //4.4.8 Expressions
-fn evalute(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<Val, Error> {
+pub fn evalute(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<Val, Error> {
     reduce_to_end(config, instrs)?;
     let entry = config.thread.stack.pop();
     match entry {
@@ -887,29 +1012,29 @@ fn allocmodule(
     externvals_im: Vec<ExternVal>,
     vals: &Vec<Val>,
 ) -> Rc<RefCell<ModuleInst>> {
-    let moduleinst = Rc::new(RefCell::new(ModuleInst::default()));
+    let moduleinst = Rc::new(RefCell::new(ModuleInst::new()));
     moduleinst.borrow_mut().types = module.types.clone();
     //1
     //2
-    let mut funcaddrs: Vec<FuncAddr> = module
+    let funcaddrs: Vec<FuncAddr> = module
         .funcs
         .iter()
         .map(|func| allocfunc(Rc::clone(&S), func, Rc::clone(&moduleinst)))
         .collect();
     //3
-    let mut tableaddrs: Vec<TableAddr> = module
+    let tableaddrs: Vec<TableAddr> = module
         .tables
         .iter()
         .map(|table| alloctable(Rc::clone(&S), &table.r#type))
         .collect();
     //4
-    let mut memaddrs: Vec<MemAddr> = module
+    let memaddrs: Vec<MemAddr> = module
         .mems
         .iter()
         .map(|mem| allocmem(Rc::clone(&S), &mem.r#type))
         .collect();
     //5
-    let mut globaladdrs: Vec<GlobalAddr> = module
+    let globaladdrs: Vec<GlobalAddr> = module
         .globals
         .iter()
         .enumerate()
@@ -1005,7 +1130,7 @@ fn allocmodule(
 }
 
 //4.5.4
-fn instantiate(
+pub fn instantiate(
     S: Rc<RefCell<Store>>,
     module: &structure::Module,
     externvals: Vec<ExternVal>,
@@ -1094,7 +1219,7 @@ fn instantiate(
     //5
     let mut vals: Vec<Val> = vec![];
     //5.a
-    let moduleinst_im = Rc::new(RefCell::new(ModuleInst::default()));
+    let moduleinst_im = Rc::new(RefCell::new(ModuleInst::new()));
     for externval in externvals.iter() {
         match externval {
             ExternVal::global(globaladdr) => {
@@ -1276,7 +1401,7 @@ fn instantiate(
 }
 
 //4.5.5
-fn invoke(
+pub fn invoke(
     S: Rc<RefCell<Store>>,
     moduleinst: Rc<RefCell<ModuleInst>>,
     funcaddr: FuncAddr,
@@ -1284,7 +1409,8 @@ fn invoke(
 ) -> Result<(Config, Vec<Val>), Error> {
     //1
     //2
-    let funcinst = &S.borrow().funcs[funcaddr as usize];
+    let S1 = S.borrow();
+    let funcinst = S1.funcs.get(funcaddr as usize).ok_or(Error::ExecuteError)?;
     //3
     let structure::FuncType { params, results } = match funcinst {
         FuncInst::func {
@@ -1428,7 +1554,7 @@ mod tests {
         }
     }
 
-    #[test]
+    // #[test]
     fn test_module_instantiate() {
         let mut f = std::fs::File::open("resources/address.wasm").unwrap();
         let mut v = Vec::new();

@@ -4,6 +4,7 @@
 mod binary;
 mod embedding;
 mod execution;
+mod interpretation;
 mod leb128;
 mod lexer;
 mod module;

@@ -283,7 +283,7 @@ pub enum Instr {
         instrs2: Vec<Instr>,
     },
     br(LabelIdx),
-    bf_if(LabelIdx),
+    br_if(LabelIdx),
     br_table {
         labelidxes: Vec<LabelIdx>,
         labelidx: LabelIdx,
@@ -299,7 +299,11 @@ pub struct MemArg {
     pub offset: u32,
     pub align: u32,
 }
-pub type BlockType = u32;
+#[derive(Debug, Clone)]
+pub enum BlockType {
+    valtype(Option<ValType>),
+    x(u32),
+}
 
 //2.4.6 Expressions
 #[derive(Debug, Clone)]
@@ -357,7 +361,7 @@ pub struct Func {
     pub body: Expr,
 }
 //2.5.4 Tables
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Table {
     pub r#type: TableType,
 }
@@ -405,13 +409,13 @@ pub enum ExportDesc {
     global(GlobalIdx),
 }
 //2.5.11 Imports
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Import {
     pub module: Name,
     pub name: Name,
     pub desc: ImportDesc,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ImportDesc {
     func(TypeIdx),
     table(TableType),
