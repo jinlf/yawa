@@ -56,6 +56,42 @@ pub enum ExternType {
     mem(MemType),
     global(GlobalType),
 }
+pub fn funcs(externtypes: &Vec<ExternType>) -> Vec<FuncType> {
+    externtypes
+        .iter()
+        .filter_map(|externtype| match externtype {
+            ExternType::func(functype) => Some(functype.clone()),
+            _ => None,
+        })
+        .collect()
+}
+pub fn tables(externtypes: &Vec<ExternType>) -> Vec<TableType> {
+    externtypes
+        .iter()
+        .filter_map(|externtype| match externtype {
+            ExternType::table(tabletype) => Some(tabletype.clone()),
+            _ => None,
+        })
+        .collect()
+}
+pub fn mems(externtypes: &Vec<ExternType>) -> Vec<MemType> {
+    externtypes
+        .iter()
+        .filter_map(|externtype| match externtype {
+            ExternType::mem(memtype) => Some(memtype.clone()),
+            _ => None,
+        })
+        .collect()
+}
+pub fn globals(externtypes: &Vec<ExternType>) -> Vec<GlobalType> {
+    externtypes
+        .iter()
+        .filter_map(|externtype| match externtype {
+            ExternType::global(globaltype) => Some(globaltype.clone()),
+            _ => None,
+        })
+        .collect()
+}
 //2.4 Instructions
 #[derive(Debug, Clone)]
 pub enum Instr {
@@ -178,7 +214,6 @@ pub enum Instr {
     i32_extend16_s,
     i64_extend16_s,
     //inn.extend32_s
-    i32_extend32_s,
     i64_extend32_s,
 
     i32_wrap_i64,
@@ -302,7 +337,7 @@ pub struct MemArg {
 #[derive(Debug, Clone)]
 pub enum BlockType {
     valtype(Option<ValType>),
-    x(u32),
+    typeidx(u32),
 }
 
 //2.4.6 Expressions
@@ -366,12 +401,12 @@ pub struct Table {
     pub r#type: TableType,
 }
 //2.5.5 Memories
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Mem {
     pub r#type: MemType,
 }
 //2.5.6 Globals
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Global {
     pub r#type: GlobalType,
     pub init: Expr,
@@ -396,12 +431,12 @@ pub struct Start {
     pub func: FuncIdx,
 }
 //2.5.10 Exports
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Export {
     pub name: Name,
     pub desc: ExportDesc,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ExportDesc {
     func(FuncIdx),
     table(TableIdx),

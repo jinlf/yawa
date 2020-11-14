@@ -1,37 +1,37 @@
 use crate::structure;
 use crate::validation;
 use libc;
-use std::cell::*;
+use std::cell::RefCell;
 use std::convert::TryInto;
 use std::fmt::Debug;
-use std::rc::*;
+use std::rc::Rc;
 
 macro_rules! process_load_instr {
     (i32, $memarg:ident, $config:ident, $instrs:ident) => {{
         match load_N_sx(structure::ValType::r#i32, None, $memarg, $config, $instrs)? {
             Val::i32_const(c) => $config.thread.stack.push(Entry::val(Val::i32_const(c))),
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
         return Ok(true);
     }};
     (i64, $memarg:ident, $config:ident, $instrs:ident) => {{
         match load_N_sx(structure::ValType::r#i64, None, $memarg, $config, $instrs)? {
             Val::i64_const(c) => $config.thread.stack.push(Entry::val(Val::i64_const(c))),
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
         return Ok(true);
     }};
     (f32, $memarg:ident, $config:ident, $instrs:ident) => {{
         match load_N_sx(structure::ValType::r#f32, None, $memarg, $config, $instrs)? {
             Val::f32_const(c) => $config.thread.stack.push(Entry::val(Val::f32_const(c))),
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
         return Ok(true);
     }};
     (f64, $memarg:ident, $config:ident, $instrs:ident) => {{
         match load_N_sx(structure::ValType::r#f64, None, $memarg, $config, $instrs)? {
             Val::f64_const(c) => $config.thread.stack.push(Entry::val(Val::f64_const(c))),
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
         return Ok(true);
     }};
@@ -44,7 +44,7 @@ macro_rules! process_load_instr {
             $instrs,
         )? {
             Val::i32_const(c) => $config.thread.stack.push(Entry::val(Val::i32_const(c))),
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
         return Ok(true);
     }};
@@ -57,7 +57,7 @@ macro_rules! process_load_instr {
             $instrs,
         )? {
             Val::i64_const(c) => $config.thread.stack.push(Entry::val(Val::i64_const(c))),
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
         return Ok(true);
     }};
@@ -65,15 +65,17 @@ macro_rules! process_load_instr {
 
 #[derive(Debug)]
 pub enum Error {
-    ExecuteError,
-    ValidateError(validation::Error),
+    ExecuteError(u32),
+    ValidateError(String),
     NotImplemented(Instr),
     TryFromSliceError(std::array::TryFromSliceError),
     TrapError(String),
 }
 impl From<validation::Error> for Error {
     fn from(e: validation::Error) -> Self {
-        Self::ValidateError(e)
+        match e {
+            validation::Error::ValidateError(msg) => Self::ValidateError(msg),
+        }
     }
 }
 impl From<std::array::TryFromSliceError> for Error {
@@ -296,16 +298,22 @@ impl PartialEq for Frame {
         self.locals == other.locals //TODO
     }
 }
-fn expand_typeidx(F: Rc<RefCell<Frame>>, typeidx: structure::TypeIdx) -> structure::FuncType {
-    F.borrow().module.borrow().types[typeidx as usize].clone()
-}
-fn expand_valtypes(
+fn expand_blocktype(
     F: Rc<RefCell<Frame>>,
-    valtypes: Vec<structure::ValType>,
+    blocktype: &structure::BlockType,
 ) -> structure::FuncType {
+    match blocktype {
+        structure::BlockType::typeidx(typeidx) => expand_typeidx(Rc::clone(&F), typeidx),
+        structure::BlockType::valtype(valtype) => expand_valtypes(valtype),
+    }
+}
+fn expand_typeidx(F: Rc<RefCell<Frame>>, typeidx: &structure::TypeIdx) -> structure::FuncType {
+    F.borrow().module.borrow().types[*typeidx as usize].clone()
+}
+fn expand_valtypes(valtype: &Option<structure::ValType>) -> structure::FuncType {
     structure::FuncType {
         params: vec![],
-        results: valtypes,
+        results: valtype.into_iter().cloned().collect(),
     }
 }
 
@@ -373,16 +381,16 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
     }
     let instr = instrs.remove(0);
     match instr {
-        Instr::trap(msg) => Err(Error::TrapError(msg)),
+        Instr::trap(msg) => Err(Error::TrapError(format!("{}", msg))),
         Instr::instr(instr) => match instr {
             structure::Instr::end => {
-                let mut vals: Vec<Val> = vec![];
+                let mut vals: Vec<Entry> = vec![];
                 loop {
                     //2
                     let entry = config.thread.stack.pop();
                     match entry {
                         Some(Entry::val(val)) => {
-                            vals.insert(0, val);
+                            vals.insert(0, Entry::val(val));
                         }
                         Some(Entry::label(_)) => {
                             //4.4.6 Blocks
@@ -391,29 +399,28 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                             let m = vals.len();
                             //3
                             //4
-                            for _ in 0..m {
-                                config.thread.stack.push(Entry::val(vals.remove(0)));
-                            }
+                            config.thread.stack.append(&mut vals);
                             return Ok(true);
                         }
                         Some(Entry::activation(activation)) => {
                             // Returning from a function
                             //1
                             //2
-                            let Activation { n, frame } = activation;
-                            config.thread.frame = Rc::clone(&frame);
+                            let Activation { n, frame: F } = activation;
+                            if n != vals.len() {
+                                return Err(Error::ExecuteError(line!()));
+                            }
+                            config.thread.frame = Rc::clone(&F);
                             //3
                             //4
                             //5
                             //6
                             //7
-                            for _ in 0..vals.len() {
-                                config.thread.stack.push(Entry::val(vals.remove(0)));
-                            }
+                            config.thread.stack.append(&mut vals);
                             return Ok(true);
                         }
                         _ => {
-                            instrs.insert(0, Instr::trap(String::from("Unknown")));
+                            instrs.insert(0, Instr::trap(format!("{}", line!())));
                             return Ok(true);
                         }
                     }
@@ -424,10 +431,47 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                 config.thread.stack.push(Entry::val(Val::i32_const(v)));
                 return Ok(true);
             }
+            structure::Instr::i64_const(v) => {
+                config.thread.stack.push(Entry::val(Val::i64_const(v)));
+                return Ok(true);
+            }
+            structure::Instr::f32_const(v) => {
+                config.thread.stack.push(Entry::val(Val::f32_const(v)));
+                return Ok(true);
+            }
+            structure::Instr::f64_const(v) => {
+                config.thread.stack.push(Entry::val(Val::f64_const(v)));
+                return Ok(true);
+            }
 
             //4.4.2 Parametric Instructions
             structure::Instr::drop => {
-                let entry = config.thread.stack.pop();
+                config.thread.stack.pop();
+                return Ok(true);
+            }
+            structure::Instr::select => {
+                //1
+                //2
+                let c = match config.thread.stack.pop() {
+                    Some(Entry::val(Val::i32_const(c))) => c,
+                    _ => return Err(Error::ExecuteError(line!())),
+                };
+                //3
+                //4
+                let val2 = match config.thread.stack.pop() {
+                    Some(Entry::val(val)) => val,
+                    _ => return Err(Error::ExecuteError(line!())),
+                };
+                //5
+                let val1 = match config.thread.stack.pop() {
+                    Some(Entry::val(val)) => val,
+                    _ => return Err(Error::ExecuteError(line!())),
+                };
+                if c != 0 {
+                    config.thread.stack.push(Entry::val(val1));
+                } else {
+                    config.thread.stack.push(Entry::val(val2));
+                }
                 return Ok(true);
             }
             //4.4.3 Variable Instructions
@@ -437,6 +481,17 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                 //3
                 let val = config.thread.frame.borrow().locals[x as usize].clone();
                 config.thread.stack.push(Entry::val(val));
+                return Ok(true);
+            }
+            structure::Instr::local_set(x) => {
+                //1
+                let mut F = config.thread.frame.borrow_mut();
+                //2
+                //3
+                match config.thread.stack.pop() {
+                    Some(Entry::val(val)) => F.locals[x as usize] = val,
+                    _ => return Err(Error::ExecuteError(line!())),
+                }
                 return Ok(true);
             }
             //4.4.4 Memory Instructions
@@ -475,9 +530,327 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
             structure::Instr::i64_load32_u(memarg) => {
                 process_load_instr!(i64, 32, false, memarg, config, instrs)
             }
+
+            structure::Instr::i32_store(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i32,
+                    None,
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::i64_store(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i64,
+                    None,
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::f32_store(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#f32,
+                    None,
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::f64_store(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#f64,
+                    None,
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::i32_store8(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i32,
+                    Some(8),
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::i64_store8(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i64,
+                    Some(8),
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::i32_store16(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i32,
+                    Some(16),
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::i64_store16(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i64,
+                    Some(16),
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+            structure::Instr::i64_store32(memarg) => {
+                return Ok(store_N(
+                    structure::ValType::r#i64,
+                    Some(32),
+                    memarg,
+                    config,
+                    instrs,
+                )?)
+            }
+
             //4.4.5 Control Instructions
+            structure::Instr::nop => return Ok(true),
+            structure::Instr::block {
+                blocktype,
+                instrs: block_instrs,
+            } => {
+                //1
+                //2
+                let F = &config.thread.frame;
+                let functype = expand_blocktype(Rc::clone(F), &blocktype);
+                let m = functype.params.len();
+                let n = functype.results.len();
+                //3
+                let L = Label {
+                    n: n,
+                    instrs: vec![],
+                };
+                //4
+                //5
+                let len = config.thread.stack.len();
+                let mut valm = config.thread.stack.split_off(len - m);
+                //6
+                config.thread.stack.push(Entry::label(L));
+                config.thread.stack.append(&mut valm);
+                instrs.insert(0, Instr::instr(structure::Instr::end));
+                instrs.splice(
+                    ..0,
+                    block_instrs.into_iter().map(|instr| Instr::instr(instr)),
+                );
+                return Ok(true);
+            }
+            structure::Instr::r#loop {
+                blocktype,
+                instrs: loop_instrs,
+            } => {
+                //1
+                //2
+                let F = &config.thread.frame;
+                let functype = expand_blocktype(Rc::clone(F), &blocktype);
+                let m = functype.params.len();
+                let n = functype.results.len();
+                //3
+                let L = Label {
+                    n: m,
+                    instrs: vec![Instr::instr(structure::Instr::r#loop {
+                        blocktype: blocktype,
+                        instrs: loop_instrs.clone(),
+                    })],
+                };
+                //4
+                //5
+                let len = config.thread.stack.len();
+                let mut valm = config.thread.stack.split_off(len - m);
+                //6
+                config.thread.stack.push(Entry::label(L));
+                config.thread.stack.append(&mut valm);
+                instrs.insert(0, Instr::instr(structure::Instr::end));
+                instrs.splice(
+                    ..0,
+                    loop_instrs.into_iter().map(|instr| Instr::instr(instr)),
+                );
+                return Ok(true);
+            }
+            structure::Instr::r#if {
+                blocktype,
+                instrs1,
+                instrs2,
+            } => {
+                //1
+                //2
+                let F = &config.thread.frame;
+                let functype = expand_blocktype(Rc::clone(F), &blocktype);
+                let m = functype.params.len();
+                let n = functype.results.len();
+                //3
+                let L = Label {
+                    n: n,
+                    instrs: vec![],
+                };
+                //4
+                //5
+                let c = match config.thread.stack.pop() {
+                    Some(Entry::val(Val::i32_const(c))) => c,
+                    _ => return Err(Error::ExecuteError(line!())),
+                };
+                //6
+                //7
+                let len = config.thread.stack.len();
+                let mut valm = config.thread.stack.split_off(len - m);
+                //8
+                config.thread.stack.push(Entry::label(L));
+                config.thread.stack.append(&mut valm);
+                instrs.insert(0, Instr::instr(structure::Instr::end));
+                if c != 0 {
+                    instrs.splice(..0, instrs1.into_iter().map(|instr| Instr::instr(instr)));
+                } else {
+                    instrs.splice(..0, instrs2.into_iter().map(|instr| Instr::instr(instr)));
+                }
+                return Ok(true);
+            }
+            structure::Instr::br(labelidx) => {
+                //1
+                //2
+                let mut count = 0;
+                let mut L: Option<Label> = None;
+                for entry in config.thread.stack.iter().rev() {
+                    match entry {
+                        Entry::label(label) => {
+                            if count == labelidx {
+                                L = Some(label.clone());
+                                break;
+                            }
+                            count += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                let L = L.ok_or(Error::ExecuteError(line!()))?;
+                let n = L.n;
+                let len = config.thread.stack.len();
+                let mut valn = config.thread.stack.split_off(len - n);
+                for _ in 0..=labelidx as usize {
+                    let pos = config
+                        .thread
+                        .stack
+                        .iter()
+                        .rev()
+                        .position(|entry| match entry {
+                            Entry::val(_) => false,
+                            _ => true,
+                        })
+                        .ok_or(Error::ExecuteError(line!()))?;
+                    let len = config.thread.stack.len();
+                    config.thread.stack.truncate(len - pos);
+                    match config.thread.stack.pop() {
+                        Some(Entry::label(_)) => {}
+                        _ => return Err(Error::ExecuteError(line!())),
+                    }
+                }
+                match instrs.remove(0) {
+                    Instr::instr(structure::Instr::end) => {}
+                    _ => return Err(Error::ExecuteError(line!())),
+                }
+                config.thread.stack.append(&mut valn);
+                instrs.splice(..0, L.instrs);
+
+                return Ok(true);
+            }
+            structure::Instr::br_if(labelidx) => {
+                //1
+                //2
+                let c = match config.thread.stack.pop() {
+                    Some(Entry::val(Val::i32_const(c))) => c,
+                    _ => return Err(Error::ExecuteError(line!())),
+                };
+                //3
+                if c != 0 {
+                    instrs.insert(0, Instr::instr(structure::Instr::br(labelidx)));
+                }
+                return Ok(true);
+            }
+            structure::Instr::br_table {
+                labelidxes,
+                labelidx,
+            } => {
+                //1
+                //2
+                match config.thread.stack.pop() {
+                    Some(Entry::val(Val::i32_const(i))) => {
+                        if (i as usize) < labelidxes.len() {
+                            instrs.insert(
+                                0,
+                                Instr::instr(structure::Instr::br(labelidxes[i as usize])),
+                            )
+                        } else {
+                            instrs.insert(0, Instr::instr(structure::Instr::br(labelidx)))
+                        }
+                    }
+                    _ => return Err(Error::ExecuteError(line!())),
+                }
+                return Ok(true);
+            }
             structure::Instr::call(x) => {
                 let a = config.thread.frame.borrow().module.borrow().funcaddrs[x as usize];
+                instrs.insert(0, Instr::invoke(a));
+                return Ok(true);
+            }
+            structure::Instr::call_indirect(x) => {
+                //1
+                let F = &config.thread.frame;
+                //2
+                //3
+                let ta = F.borrow().module.borrow().tableaddrs[0];
+                //4
+                //5
+                let tab = &config.store.borrow().tables[ta as usize];
+                //6
+                //7
+                let ft_expect = F.borrow().module.borrow().types[x as usize].clone();
+                //8
+                //9
+                let i = match config.thread.stack.pop() {
+                    Some(Entry::val(Val::i32_const(i))) => i,
+                    _ => return Err(Error::ExecuteError(line!())),
+                };
+                //10
+                if (i as usize) >= tab.elem.len() {
+                    instrs.insert(0, Instr::trap(format!("{}", line!())));
+                    return Ok(true);
+                }
+                //11
+                if tab.elem[i as usize].is_none() {
+                    instrs.insert(0, Instr::trap(format!("{}", line!())));
+                    return Ok(true);
+                }
+                //12
+                let a = tab.elem[i as usize].unwrap();
+                //13
+                //14
+                let f = &config.store.borrow().funcs[a as usize];
+                //15
+                let ft_actual = match f {
+                    FuncInst::func {
+                        r#type,
+                        module: _,
+                        code: _,
+                    } => r#type.clone(),
+                    FuncInst::hostfunc {
+                        r#type,
+                        hostcode: _,
+                    } => r#type.clone(),
+                };
+                //16
+                if ft_actual != ft_expect {
+                    instrs.insert(0, Instr::trap(format!("{}", line!())));
+                    return Ok(true);
+                }
+                //17
                 instrs.insert(0, Instr::invoke(a));
                 return Ok(true);
             }
@@ -511,44 +884,40 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                                 vals.insert(0, val);
                             }
                             _ => {
-                                instrs.insert(0, Instr::trap(String::from("Unknown")));
+                                instrs.insert(0, Instr::trap(format!("{}", line!())));
                                 return Ok(true);
                             }
                         }
                     }
                     //8
                     for t in ts.iter() {
-                        match t {
-                            structure::ValType::r#i32 => {
-                                vals.push(Val::i32_const(0));
-                            }
-                            structure::ValType::r#i64 => {
-                                vals.push(Val::i64_const(0));
-                            }
-                            structure::ValType::r#f32 => {
-                                vals.push(Val::f32_const(0.0));
-                            }
-                            structure::ValType::r#f64 => {
-                                vals.push(Val::f64_const(0.0));
-                            }
-                        }
+                        let val0 = match t {
+                            structure::ValType::r#i32 => Val::i32_const(0),
+                            structure::ValType::r#i64 => Val::i64_const(0),
+                            structure::ValType::r#f32 => Val::f32_const(0.0),
+                            structure::ValType::r#f64 => Val::f64_const(0.0),
+                        };
+                        vals.push(val0);
                     }
                     //9
-                    let newF = Rc::new(RefCell::new(Frame {
+                    let F = Rc::new(RefCell::new(Frame {
                         module: Rc::clone(&config.thread.frame.borrow().module),
                         locals: vals,
                     }));
                     //10
-                    config.thread.frame = Rc::clone(&newF);
+                    config.thread.frame = Rc::clone(&F);
                     config.thread.stack.push(Entry::activation(Activation {
                         n: m,
-                        frame: Rc::clone(&newF),
+                        frame: Rc::clone(&F),
                     }));
                     //11
                     config.thread.stack.push(Entry::label(Label {
                         n: m,
                         instrs: vec![],
                     }));
+
+                    instrs.insert(0, Instr::instr(structure::Instr::end));
+                    instrs.insert(0, Instr::instr(structure::Instr::end));
                     let body_instrs: Vec<Instr> = code
                         .body
                         .instrs
@@ -557,8 +926,6 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                         .collect();
                     instrs.splice(..0, body_instrs);
                     //12
-                    instrs.push(Instr::instr(structure::Instr::end));
-                    instrs.push(Instr::instr(structure::Instr::end));
                     return Ok(true);
                 }
                 FuncInst::hostfunc { r#type, hostcode } => {
@@ -573,7 +940,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                                 vals.insert(0, val);
                             }
                             _ => {
-                                instrs.insert(0, Instr::trap(String::from("Unknown")));
+                                instrs.insert(0, Instr::trap(format!("{}", line!())));
                                 return Ok(true);
                             }
                         }
@@ -590,7 +957,7 @@ fn reduce(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<bool, Error> {
                             }
                         }
                         Err(_) => {
-                            instrs.insert(0, Instr::trap(String::from("Unknown")));
+                            instrs.insert(0, Instr::trap(format!("{}", line!())));
                             return Ok(true);
                         }
                     }
@@ -620,7 +987,7 @@ fn load_N_sx(
     //7
     let i = match config.thread.stack.pop() {
         Some(Entry::val(Val::i32_const(i))) => i,
-        _ => return Err(Error::ExecuteError),
+        _ => return Err(Error::ExecuteError(line!())),
     };
     //8
     let (ea, overflow) = (i as u32).overflowing_add(memarg.offset);
@@ -674,6 +1041,162 @@ fn load_N_sx(
         }
     }
 }
+fn store_N(
+    t: structure::ValType,
+    N: Option<usize>,
+    memarg: structure::MemArg,
+    config: &mut Config,
+    instrs: &mut Vec<Instr>,
+) -> Result<bool, Error> {
+    //1
+    let F = &config.thread.frame;
+    //2
+    //3
+    let a = F.borrow().module.borrow().memaddrs[0];
+    //4
+    //5
+    //6
+    //7
+    let c = match config.thread.stack.pop() {
+        Some(Entry::val(val)) => val,
+        _ => return Err(Error::ExecuteError(line!())),
+    };
+    match t {
+        structure::ValType::r#i32 => match c {
+            Val::i32_const(_) => {}
+            _ => return Err(Error::ExecuteError(line!())),
+        },
+        structure::ValType::r#i64 => match c {
+            Val::i64_const(_) => {}
+            _ => return Err(Error::ExecuteError(line!())),
+        },
+        structure::ValType::r#f32 => match c {
+            Val::f32_const(_) => {}
+            _ => return Err(Error::ExecuteError(line!())),
+        },
+        structure::ValType::r#f64 => match c {
+            Val::f64_const(_) => {}
+            _ => return Err(Error::ExecuteError(line!())),
+        },
+    }
+    //8
+    //9
+    let i = match config.thread.stack.pop() {
+        Some(Entry::val(Val::i32_const(i))) => i,
+        _ => return Err(Error::ExecuteError(line!())),
+    };
+    //10
+    let ea = i + memarg.offset as i32;
+    //11
+    let N1 = match N {
+        Some(N) => N,
+        _ => match t {
+            structure::ValType::r#i32 => 32,
+            structure::ValType::r#i64 => 64,
+            structure::ValType::r#f32 => 32,
+            structure::ValType::r#f64 => 64,
+        },
+    };
+    //12
+    if (ea + (N1 as i32) / 8) as usize > config.store.borrow_mut().mems[a as usize].data.len() {
+        instrs.insert(0, Instr::trap(format!("{}", line!())));
+    }
+    //13
+    let bs = match N {
+        Some(N) => {
+            let n = wrap_M_N(N, c)?;
+            bytes_i_N(N, n)?
+        }
+        _ => {
+            //14
+            bytes_t(c)?
+        }
+    };
+
+    config.store.borrow_mut().mems[a as usize]
+        .data
+        .splice((ea as usize)..((ea + N1 as i32 / 8) as usize), bs);
+    return Ok(true);
+}
+fn wrap_M_N(N: usize, c: Val) -> Result<Val, Error> {
+    match c {
+        Val::i32_const(i) => match N {
+            8 | 16 => Ok(Val::i32_const(i % (1_i32 << N))),
+            _ => Err(Error::ExecuteError(line!())),
+        },
+        Val::i64_const(i) => match N {
+            8 | 16 | 32 => Ok(Val::i64_const(i % (1_i64 << N))),
+            _ => Err(Error::ExecuteError(line!())),
+        },
+        _ => Err(Error::ExecuteError(line!())),
+    }
+}
+fn bytes_i_N(N: usize, n: Val) -> Result<Vec<u8>, Error> {
+    match N {
+        8 => {
+            match n {
+                // i32.store8
+                Val::i32_const(i) => {
+                    let v = i as i8;
+                    Ok(v.to_le_bytes().to_vec())
+                }
+                // i64.store8
+                Val::i64_const(i) => {
+                    let v = i as i8;
+                    Ok(v.to_le_bytes().to_vec())
+                }
+                _ => Err(Error::ExecuteError(line!())),
+            }
+        }
+        16 => {
+            match n {
+                // i32.store16
+                Val::i32_const(i) => {
+                    let v = i as i16;
+                    Ok(v.to_le_bytes().to_vec())
+                }
+                //i64.store16
+                Val::i64_const(i) => {
+                    let v = i as i16;
+                    Ok(v.to_le_bytes().to_vec())
+                }
+                _ => Err(Error::ExecuteError(line!())),
+            }
+        }
+        32 => {
+            match n {
+                // i32.store
+                Val::i32_const(i) => {
+                    let v = i as i32;
+                    Ok(v.to_le_bytes().to_vec())
+                }
+                //i64.store32
+                Val::i64_const(i) => {
+                    let v = i as i32;
+                    Ok(v.to_le_bytes().to_vec())
+                }
+                _ => Err(Error::ExecuteError(line!())),
+            }
+        }
+        64 => {
+            match n {
+                //i64.store
+                Val::i64_const(i) => Ok(i.to_le_bytes().to_vec()),
+                _ => Err(Error::ExecuteError(line!())),
+            }
+        }
+        _ => Err(Error::ExecuteError(line!())),
+    }
+}
+fn bytes_t(c: Val) -> Result<Vec<u8>, Error> {
+    match c {
+        Val::i32_const(i) => Ok(i.to_le_bytes().to_vec()),
+        Val::i64_const(i) => Ok(i.to_le_bytes().to_vec()),
+        Val::f32_const(f) => Ok(f.to_le_bytes().to_vec()),
+        Val::f64_const(f) => Ok(f.to_le_bytes().to_vec()),
+    }
+}
+
 fn extend_sx_N_t(N: usize, sx: bool, t: structure::ValType, n: Integer) -> Result<Val, Error> {
     match N {
         8 => {
@@ -682,28 +1205,28 @@ fn extend_sx_N_t(N: usize, sx: bool, t: structure::ValType, n: Integer) -> Resul
                     structure::ValType::r#i32 => match n {
                         // i32.load8_s
                         Integer::b8(buf) => Ok(Val::i32_const(i8::from_le_bytes(buf) as i32)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
                     structure::ValType::r#i64 => match n {
                         // i64.load8_s
                         Integer::b8(buf) => Ok(Val::i64_const(i8::from_le_bytes(buf) as i64)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
-                    _ => Err(Error::ExecuteError),
+                    _ => Err(Error::ExecuteError(line!())),
                 }
             } else {
                 match t {
                     structure::ValType::r#i32 => match n {
                         // i32.load8_u
                         Integer::b8(buf) => Ok(Val::i32_const(u8::from_le_bytes(buf) as i32)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
                     structure::ValType::r#i64 => match n {
                         // i64.load8_u
                         Integer::b8(buf) => Ok(Val::i64_const(u8::from_le_bytes(buf) as i64)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
-                    _ => Err(Error::ExecuteError),
+                    _ => Err(Error::ExecuteError(line!())),
                 }
             }
         }
@@ -713,28 +1236,28 @@ fn extend_sx_N_t(N: usize, sx: bool, t: structure::ValType, n: Integer) -> Resul
                     structure::ValType::r#i32 => match n {
                         // i32.load16_s
                         Integer::b16(buf) => Ok(Val::i32_const(i16::from_le_bytes(buf) as i32)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
                     structure::ValType::r#i64 => match n {
                         // i64.load16_s
                         Integer::b16(buf) => Ok(Val::i64_const(i16::from_le_bytes(buf) as i64)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
-                    _ => Err(Error::ExecuteError),
+                    _ => Err(Error::ExecuteError(line!())),
                 }
             } else {
                 match t {
                     structure::ValType::r#i32 => match n {
                         // i32.load16_u
                         Integer::b16(buf) => Ok(Val::i32_const(u16::from_le_bytes(buf) as i32)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
                     structure::ValType::r#i64 => match n {
                         // i64.load16_u
                         Integer::b16(buf) => Ok(Val::i64_const(u16::from_le_bytes(buf) as i64)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
-                    _ => Err(Error::ExecuteError),
+                    _ => Err(Error::ExecuteError(line!())),
                 }
             }
         }
@@ -744,24 +1267,25 @@ fn extend_sx_N_t(N: usize, sx: bool, t: structure::ValType, n: Integer) -> Resul
                     structure::ValType::r#i64 => match n {
                         // i64.load32_s
                         Integer::b32(buf) => Ok(Val::i64_const(i32::from_le_bytes(buf) as i64)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
-                    _ => Err(Error::ExecuteError),
+                    _ => Err(Error::ExecuteError(line!())),
                 }
             } else {
                 match t {
                     structure::ValType::r#i64 => match n {
                         // i64.load32_u
                         Integer::b32(buf) => Ok(Val::i64_const(u32::from_le_bytes(buf) as i64)),
-                        _ => Err(Error::ExecuteError),
+                        _ => Err(Error::ExecuteError(line!())),
                     },
-                    _ => Err(Error::ExecuteError),
+                    _ => Err(Error::ExecuteError(line!())),
                 }
             }
         }
-        _ => Err(Error::ExecuteError),
+        _ => Err(Error::ExecuteError(line!())),
     }
 }
+
 enum Integer {
     b8([u8; 1]),
     b16([u8; 2]),
@@ -775,7 +1299,7 @@ fn ibits_N(N: usize, b: &[u8]) -> Result<Integer, Error> {
         16 => Ok(Integer::b16(b.try_into()?)),
         32 => Ok(Integer::b32(b.try_into()?)),
         64 => Ok(Integer::b64(b.try_into()?)),
-        _ => Err(Error::ExecuteError),
+        _ => Err(Error::ExecuteError(line!())),
     }
 }
 fn fbits_N(N: usize, b: &[u8]) -> Result<Val, Error> {
@@ -788,7 +1312,7 @@ fn fbits_N(N: usize, b: &[u8]) -> Result<Val, Error> {
             assert!(b.len() >= 8);
             Ok(Val::f64_const(f64::from_le_bytes(b.try_into()?)))
         }
-        _ => Err(Error::ExecuteError),
+        _ => Err(Error::ExecuteError(line!())),
     }
 }
 
@@ -822,7 +1346,7 @@ pub fn evalute(config: &mut Config, instrs: &mut Vec<Instr>) -> Result<Val, Erro
     let entry = config.thread.stack.pop();
     match entry {
         Some(Entry::val(val)) => Ok(val),
-        _ => Err(Error::ExecuteError),
+        _ => Err(Error::ExecuteError(line!())),
     }
 }
 
@@ -980,10 +1504,10 @@ fn growtable(tableinst: &mut TableInst, n: u32) -> Result<(), Error> {
     let len: usize = n as usize;
     if len >= u32::MAX as usize {
         //3
-        Err(Error::ExecuteError)
+        Err(Error::ExecuteError(line!()))
     } else if tableinst.max.is_some() && (tableinst.max.unwrap() as usize) < len {
         //4
-        Err(Error::ExecuteError)
+        Err(Error::ExecuteError(line!()))
     } else {
         let mut newitems = vec![FuncElem::default(); len];
         Ok(tableinst.elem.append(&mut newitems)) //5
@@ -997,10 +1521,10 @@ fn growmem(meminst: &mut MemInst, n: u32) -> Result<(), Error> {
     let len: usize = n as usize;
     if len > (1_usize << 16) {
         //4
-        Err(Error::ExecuteError)
+        Err(Error::ExecuteError(line!()))
     } else if meminst.max.is_some() && (meminst.max.unwrap() as usize) < len {
         //5
-        Err(Error::ExecuteError)
+        Err(Error::ExecuteError(line!()))
     } else {
         let mut newitems = vec![0; len];
         Ok(meminst.data.append(&mut newitems))
@@ -1136,7 +1660,7 @@ pub fn instantiate(
     externvals: Vec<ExternVal>,
 ) -> Result<(Rc<RefCell<Frame>>, Vec<Val>), Error> {
     //1
-    crate::validation::module_validate(module)?;
+    validation::validate(module)?;
     //2
     let mut externtypes_im: Vec<structure::ExternType> = vec![];
     for import in module.imports.iter() {
@@ -1159,7 +1683,7 @@ pub fn instantiate(
     let m = module.imports.len();
     let n = externvals.len();
     if m != n {
-        return Err(Error::ExecuteError);
+        return Err(Error::ExecuteError(line!()));
     }
 
     //4
@@ -1213,7 +1737,7 @@ pub fn instantiate(
         //TODO
         //4.b
         if !externtype.type_match(&externtype1) {
-            return Err(Error::ExecuteError);
+            return Err(Error::ExecuteError(line!()));
         }
     }
     //5
@@ -1242,7 +1766,7 @@ pub fn instantiate(
         },
     };
     config.thread.stack.push(Entry::activation(Activation {
-        n: 0,
+        n: n, // TODO
         frame: Rc::clone(&F_im),
     }));
     //5.d
@@ -1261,7 +1785,7 @@ pub fn instantiate(
     let entry = config.thread.stack.pop();
     match entry {
         Some(Entry::activation(Activation { n: _, frame: _ })) => {}
-        _ => return Err(Error::ExecuteError),
+        _ => return Err(Error::ExecuteError(line!())),
     }
 
     //6
@@ -1290,7 +1814,7 @@ pub fn instantiate(
         let val = evalute(&mut config, &mut instrs)?;
         match val {
             Val::i32_const(eo) => eovals.push(eo),
-            _ => return Err(Error::ExecuteError), //9.b
+            _ => return Err(Error::ExecuteError(line!())), //9.b
         }
         //9.c
         let tableidx = elem.table;
@@ -1304,7 +1828,7 @@ pub fn instantiate(
         let eend = (eovals[i] as usize) + elem.init.len();
         //9.i
         if eend > tableinst.elem.len() {
-            return Err(Error::ExecuteError);
+            return Err(Error::ExecuteError(line!()));
         }
     }
     //10
@@ -1322,7 +1846,7 @@ pub fn instantiate(
 
         match val {
             Val::i32_const(r#do) => dovals.push(r#do),
-            _ => return Err(Error::ExecuteError), //10.b
+            _ => return Err(Error::ExecuteError(line!())), //10.b
         }
         //10.c
         let memidx = data.data;
@@ -1336,7 +1860,7 @@ pub fn instantiate(
         let dend = (dovals[i] as usize) + data.init.len();
         //10.i
         if dend > meminst.data.len() {
-            return Err(Error::ExecuteError);
+            return Err(Error::ExecuteError(line!()));
         }
     }
     //11
@@ -1344,7 +1868,7 @@ pub fn instantiate(
     let entry = config.thread.stack.pop();
     match entry {
         Some(Entry::activation(Activation { n: _, frame: _ })) => {}
-        _ => return Err(Error::ExecuteError),
+        _ => return Err(Error::ExecuteError(line!())),
     }
     //13
     for (i, elem) in module.elem.iter().enumerate() {
@@ -1392,7 +1916,7 @@ pub fn instantiate(
             let entry = config.thread.stack.pop();
             match entry {
                 Some(Entry::val(val)) => vals.insert(0, val),
-                _ => return Err(Error::ExecuteError),
+                _ => return Err(Error::ExecuteError(line!())),
             }
         }
     }
@@ -1409,25 +1933,28 @@ pub fn invoke(
 ) -> Result<(Config, Vec<Val>), Error> {
     //1
     //2
-    let S1 = S.borrow();
-    let funcinst = S1.funcs.get(funcaddr as usize).ok_or(Error::ExecuteError)?;
     //3
-    let structure::FuncType { params, results } = match funcinst {
+    let structure::FuncType { params, results } = match S
+        .borrow()
+        .funcs
+        .get(funcaddr as usize)
+        .ok_or(Error::ExecuteError(line!()))?
+    {
         FuncInst::func {
             r#type,
             module: _,
             code: _,
-        } => r#type,
+        } => r#type.clone(),
         FuncInst::hostfunc {
             r#type,
             hostcode: _,
-        } => r#type,
+        } => r#type.clone(),
     };
     let n = params.len();
     let m = results.len();
     //4
     if vals.len() != n {
-        return Err(Error::ExecuteError);
+        return Err(Error::ExecuteError(line!()));
     }
     //5
     for i in 0..n {
@@ -1436,19 +1963,19 @@ pub fn invoke(
         match t {
             structure::ValType::r#i32 => match val {
                 Val::i32_const(_) => {}
-                _ => return Err(Error::ExecuteError), //5.a.i
+                _ => return Err(Error::ExecuteError(line!())), //5.a.i
             },
             structure::ValType::r#i64 => match val {
                 Val::i64_const(_) => {}
-                _ => return Err(Error::ExecuteError), //5.a.i
+                _ => return Err(Error::ExecuteError(line!())), //5.a.i
             },
             structure::ValType::r#f32 => match val {
                 Val::f32_const(_) => {}
-                _ => return Err(Error::ExecuteError), //5.a.i
+                _ => return Err(Error::ExecuteError(line!())), //5.a.i
             },
             structure::ValType::r#f64 => match val {
                 Val::f64_const(_) => {}
-                _ => return Err(Error::ExecuteError), //5.a.i
+                _ => return Err(Error::ExecuteError(line!())), //5.a.i
             },
         }
     }
@@ -1466,7 +1993,7 @@ pub fn invoke(
         },
     };
     config.thread.stack.push(Entry::activation(Activation {
-        n: 0,
+        n: m,
         frame: Rc::clone(&F),
     }));
     //8
@@ -1479,17 +2006,17 @@ pub fn invoke(
 
     //1
     //2
-    let mut retvals: Vec<Val> = vec![];
+    let mut valm_res: Vec<Val> = vec![];
     for _ in 0..m {
         let entry = config.thread.stack.pop();
         match entry {
             Some(Entry::val(val)) => {
-                retvals.insert(0, val);
+                valm_res.insert(0, val);
             }
-            _ => return Err(Error::ExecuteError),
+            _ => return Err(Error::ExecuteError(line!())),
         }
     }
-    Ok((config, retvals))
+    Ok((config, valm_res))
 }
 fn invoke_hostfunc(
     S: Rc<RefCell<Store>>,
@@ -1512,18 +2039,17 @@ fn invoke_hostfunc(
                     return Ok(vec![Val::i32_const(ret)]);
                 }
                 _ => {
-                    return Err(Error::ExecuteError);
+                    return Err(Error::ExecuteError(line!()));
                 }
             }
         }
-        _ => Err(Error::ExecuteError),
+        _ => Err(Error::ExecuteError(line!())),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
     fn assert_return(
         store: Rc<RefCell<Store>>,
@@ -1552,114 +2078,5 @@ mod tests {
             }
             _ => assert!(false),
         }
-    }
-
-    // #[test]
-    fn test_module_instantiate() {
-        let mut f = std::fs::File::open("resources/address.wasm").unwrap();
-        let mut v = Vec::new();
-        f.read_to_end(&mut v).unwrap();
-        let module = crate::module_decode(v).unwrap();
-        let S = crate::store_init();
-        let (F, _) = instantiate(Rc::clone(&S), &module, vec![]).unwrap();
-        assert_return(
-            Rc::clone(&S),
-            Rc::clone(&F.borrow().module),
-            "8u_good1",
-            Val::i32_const(0),
-            Val::i32_const(97),
-        );
-
-        // (assert_return (invoke "8u_good1" (i32.const 0)) (i32.const 97))
-        // (assert_return (invoke "8u_good2" (i32.const 0)) (i32.const 97))
-        // (assert_return (invoke "8u_good3" (i32.const 0)) (i32.const 98))
-        // (assert_return (invoke "8u_good4" (i32.const 0)) (i32.const 99))
-        // (assert_return (invoke "8u_good5" (i32.const 0)) (i32.const 122))
-        // (assert_return (invoke "8s_good1" (i32.const 0)) (i32.const 97))
-        // (assert_return (invoke "8s_good2" (i32.const 0)) (i32.const 97))
-        // (assert_return (invoke "8s_good3" (i32.const 0)) (i32.const 98))
-        // (assert_return (invoke "8s_good4" (i32.const 0)) (i32.const 99))
-        // (assert_return (invoke "8s_good5" (i32.const 0)) (i32.const 122))
-        // (assert_return (invoke "16u_good1" (i32.const 0)) (i32.const 25185))
-        // (assert_return (invoke "16u_good2" (i32.const 0)) (i32.const 25185))
-        // (assert_return (invoke "16u_good3" (i32.const 0)) (i32.const 25442))
-        // (assert_return (invoke "16u_good4" (i32.const 0)) (i32.const 25699))
-        // (assert_return (invoke "16u_good5" (i32.const 0)) (i32.const 122))
-        // (assert_return (invoke "16s_good1" (i32.const 0)) (i32.const 25185))
-        // (assert_return (invoke "16s_good2" (i32.const 0)) (i32.const 25185))
-        // (assert_return (invoke "16s_good3" (i32.const 0)) (i32.const 25442))
-        // (assert_return (invoke "16s_good4" (i32.const 0)) (i32.const 25699))
-        // (assert_return (invoke "16s_good5" (i32.const 0)) (i32.const 122))
-        // (assert_return (invoke "32_good1" (i32.const 0)) (i32.const 1684234849))
-        // (assert_return (invoke "32_good2" (i32.const 0)) (i32.const 1684234849))
-        // (assert_return (invoke "32_good3" (i32.const 0)) (i32.const 1701077858))
-        // (assert_return (invoke "32_good4" (i32.const 0)) (i32.const 1717920867))
-        // (assert_return (invoke "32_good5" (i32.const 0)) (i32.const 122))
-        // (assert_return (invoke "8u_good1" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8u_good2" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8u_good3" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8u_good4" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8u_good5" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8s_good1" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8s_good2" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8s_good3" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8s_good4" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8s_good5" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16u_good1" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16u_good2" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16u_good3" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16u_good4" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16u_good5" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16s_good1" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16s_good2" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16s_good3" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16s_good4" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "16s_good5" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "32_good1" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "32_good2" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "32_good3" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "32_good4" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "32_good5" (i32.const 65507)) (i32.const 0))
-        // (assert_return (invoke "8u_good1" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8u_good2" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8u_good3" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8u_good4" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8u_good5" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8s_good1" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8s_good2" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8s_good3" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8s_good4" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "8s_good5" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16u_good1" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16u_good2" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16u_good3" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16u_good4" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16u_good5" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16s_good1" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16s_good2" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16s_good3" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16s_good4" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "16s_good5" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "32_good1" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "32_good2" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "32_good3" (i32.const 65508)) (i32.const 0))
-        // (assert_return (invoke "32_good4" (i32.const 65508)) (i32.const 0))
-        // (assert_trap (invoke "32_good5" (i32.const 65508)) "out of bounds memory access")
-        // (assert_trap (invoke "8u_good3" (i32.const -1)) "out of bounds memory access")
-        // (assert_trap (invoke "8s_good3" (i32.const -1)) "out of bounds memory access")
-        // (assert_trap (invoke "16u_good3" (i32.const -1)) "out of bounds memory access")
-        // (assert_trap (invoke "16s_good3" (i32.const -1)) "out of bounds memory access")
-        // (assert_trap (invoke "32_good3" (i32.const -1)) "out of bounds memory access")
-        // (assert_trap (invoke "32_good3" (i32.const -1)) "out of bounds memory access")
-        // (assert_trap (invoke "8u_bad" (i32.const 0)) "out of bounds memory access")
-        // (assert_trap (invoke "8s_bad" (i32.const 0)) "out of bounds memory access")
-        // (assert_trap (invoke "16u_bad" (i32.const 0)) "out of bounds memory access")
-        // (assert_trap (invoke "16s_bad" (i32.const 0)) "out of bounds memory access")
-        // (assert_trap (invoke "32_bad" (i32.const 0)) "out of bounds memory access")
-        // (assert_trap (invoke "8u_bad" (i32.const 1)) "out of bounds memory access")
-        // (assert_trap (invoke "8s_bad" (i32.const 1)) "out of bounds memory access")
-        // (assert_trap (invoke "16u_bad" (i32.const 1)) "out of bounds memory access")
-        // (assert_trap (invoke "16s_bad" (i32.const 1)) "out of bounds memory access")
-        // (assert_trap (invoke "32_bad" (i32.const 1)) "out of bounds memory access")
     }
 }

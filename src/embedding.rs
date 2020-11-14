@@ -1,17 +1,19 @@
 use crate::binary;
 use crate::execution;
 use crate::module;
-use crate::parser::*;
+use crate::parser;
 use crate::structure::*;
-use std::cell::*;
-use std::rc::*;
+use crate::validation;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 //7.1.2 Errors
 #[derive(Debug)]
 pub enum Error {
     DecodeError(binary::Error),
-    ParseError(ParseError),
+    ParseError(parser::Error),
     ExecuteError(execution::Error),
+    ValidateError(validation::Error),
     NotFound,
 }
 impl From<binary::Error> for Error {
@@ -19,14 +21,19 @@ impl From<binary::Error> for Error {
         Self::DecodeError(e)
     }
 }
-impl From<ParseError> for Error {
-    fn from(e: ParseError) -> Self {
+impl From<parser::Error> for Error {
+    fn from(e: parser::Error) -> Self {
         Self::ParseError(e)
     }
 }
 impl From<execution::Error> for Error {
     fn from(e: execution::Error) -> Self {
         Self::ExecuteError(e)
+    }
+}
+impl From<validation::Error> for Error {
+    fn from(e: validation::Error) -> Self {
+        Self::ValidateError(e)
     }
 }
 
@@ -39,12 +46,12 @@ pub fn module_decode(bytes: Vec<u8>) -> Result<Module, Error> {
     Ok(binary::decode(bytes)?)
 }
 pub fn module_parse(chars: String) -> Result<Module, Error> {
-    let mut c = ParseContext::new(chars);
+    let mut c = parser::ParseContext::new(chars)?;
     let (_, module) = module::ModuleParser::parse_module(&mut c)?;
     Ok(module)
 }
 pub fn module_validate(module: &Module) -> Result<(), Error> {
-    todo!()
+    Ok(validation::validate(module)?)
 }
 pub fn module_instantiate(
     store: Rc<RefCell<execution::Store>>,

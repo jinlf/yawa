@@ -1,5 +1,4 @@
-use crate::parser::*;
-use crate::process_instr;
+use crate::parser;
 use crate::structure::*;
 use crate::token::*;
 use std::str::FromStr;
@@ -29,30 +28,37 @@ impl IdentifierContext {
             typedefs: vec![],
         }
     }
-    fn find_or_push_typedef(
-        &mut self,
-        module: &mut Module,
-        params: &Vec<Param>,
-        results: &Vec<ValType>,
-    ) -> u32 {
-        let params = params.iter().map(|param| param.valtype.clone()).collect();
-        match self
-            .typedefs
-            .iter()
-            .position(|typedef| typedef.params == params && typedef.results == *results)
-        {
-            Some(p) => p as u32,
-            _ => {
-                self.types.push(None);
-                let index = self.typedefs.len() as u32;
-                let ft = FuncType {
-                    params: params,
-                    results: results.to_vec(),
-                };
-                self.typedefs.push(ft.clone());
-                module.types.push(ft);
-                index
+    pub fn append(&mut self, other: &Self) {
+        self.types.append(&mut other.types.clone());
+        self.funcs.append(&mut other.funcs.clone());
+        self.tables.append(&mut other.tables.clone());
+        self.mems.append(&mut other.mems.clone());
+        self.globals.append(&mut other.globals.clone());
+        self.locals.append(&mut other.locals.clone());
+        self.labels.append(&mut other.labels.clone());
+        self.typedefs.append(&mut other.typedefs.clone());
+    }
+}
+
+fn find_or_push_type(ft: &FuncType, id: Option<Id>, I: &mut IdentifierContext) -> u32 {
+    match I.typedefs.iter().position(|fuctype| fuctype == ft) {
+        Some(p) => {
+            match id {
+                Some(_) => {
+                    let index = I.typedefs.len() as u32;
+                    I.types.push(id);
+                    I.typedefs.push(ft.clone());
+                    return index;
+                }
+                _ => I.types[p] = id,
             }
+            p as u32
+        }
+        _ => {
+            let index = I.typedefs.len() as u32;
+            I.types.push(id);
+            I.typedefs.push(ft.clone());
+            index
         }
     }
 }
@@ -88,7 +94,7 @@ struct Local {
 pub struct ModuleParser {}
 impl ModuleParser {
     //6.3.1
-    pub fn parse_u32(c: &mut ParseContext) -> Result<u32, ParseError> {
+    pub fn parse_u32(c: &mut parser::ParseContext) -> Result<u32, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::NUM(s) => {
                 let v = if s.starts_with("0x") {
@@ -96,25 +102,29 @@ impl ModuleParser {
                 } else {
                     u64::from_str_radix(&s[..], 10)?
                 };
-                c.next_token();
+                c.next_token()?;
                 Ok(v as u32)
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
-    pub fn read_u32(s: String) -> Result<u32, ParseError> {
+    pub fn read_u32(s: String) -> Result<u32, parser::Error> {
         let v = if s.starts_with("0x") {
             u64::from_str_radix(&s[2..], 16)?
         } else {
             u64::from_str_radix(&s[..], 10)?
         };
-        Ok(v as u32)
+        if v > u32::MAX as u64 {
+            Err(parser::Error::Malformed(String::from("i32 constant")))
+        } else {
+            Ok(v as u32)
+        }
     }
-    pub fn parse_i32(c: &mut ParseContext) -> Result<i32, ParseError> {
+    pub fn parse_i32(c: &mut parser::ParseContext) -> Result<i32, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::NUM(num) => {
                 let mut s = num.clone();
-                c.next_token();
+                c.next_token()?;
                 let mut factor = 1_i64;
                 if s.starts_with("+") {
                     s.remove(0);
@@ -137,14 +147,14 @@ impl ModuleParser {
                     }
                 }
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
-    pub fn parse_i64(c: &mut ParseContext) -> Result<i64, ParseError> {
+    pub fn parse_i64(c: &mut parser::ParseContext) -> Result<i64, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::NUM(num) => {
                 let mut s = num.clone();
-                c.next_token();
+                c.next_token()?;
                 let mut factor = 1_i64;
                 if s.starts_with("+") {
                     s.remove(0);
@@ -167,18 +177,18 @@ impl ModuleParser {
                     }
                 }
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.3.2
-    pub fn parse_f32(c: &mut ParseContext) -> Result<f32, ParseError> {
+    pub fn parse_f32(c: &mut parser::ParseContext) -> Result<f32, parser::Error> {
         Ok(Self::parse_f64(c)? as f32)
     }
-    pub fn parse_f64(c: &mut ParseContext) -> Result<f64, ParseError> {
+    pub fn parse_f64(c: &mut parser::ParseContext) -> Result<f64, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::NUM(num) => {
                 let mut s = num.clone();
-                c.next_token();
+                c.next_token()?;
                 let mut factor = 1_f64;
                 if s.starts_with("+") {
                     s.remove(0);
@@ -279,10 +289,10 @@ impl ModuleParser {
                     }
                 }
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
-    fn f64_from_hexstring(s: &str) -> Result<f64, ParseError> {
+    fn f64_from_hexstring(s: &str) -> Result<f64, parser::Error> {
         match u64::from_str_radix(s, 16) {
             Ok(u) => Ok(u as f64),
             _ => {
@@ -296,7 +306,7 @@ impl ModuleParser {
             }
         }
     }
-    fn parse_frac(s: &str) -> Result<f64, ParseError> {
+    fn parse_frac(s: &str) -> Result<f64, parser::Error> {
         let mut d: f64 = 0.0;
         let mut first = true;
         for c in s.chars() {
@@ -312,7 +322,7 @@ impl ModuleParser {
         }
         Ok(d)
     }
-    fn parse_hexfrac(s: &str) -> Result<f64, ParseError> {
+    fn parse_hexfrac(s: &str) -> Result<f64, parser::Error> {
         let mut h: f64 = 0.0;
         let mut first = true;
         for c in s.chars() {
@@ -329,34 +339,34 @@ impl ModuleParser {
         Ok(h)
     }
     //6.3.3
-    pub fn parse_string(c: &mut ParseContext) -> Result<String, ParseError> {
+    pub fn parse_string(c: &mut parser::ParseContext) -> Result<Vec<u8>, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::STRING(buf) => {
-                let s = String::from_utf8(buf.to_vec())?;
-                c.next_token();
-                Ok(s)
+                let bs = buf.clone();
+                c.next_token()?;
+                Ok(bs)
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.3.4
-    pub fn parse_name(c: &mut ParseContext) -> Result<Name, ParseError> {
-        Ok(Self::parse_string(c)?)
+    pub fn parse_name(c: &mut parser::ParseContext) -> Result<Name, parser::Error> {
+        Ok(String::from_utf8(Self::parse_string(c)?)?)
     }
     //6.3.5
-    pub fn parse_id(c: &mut ParseContext) -> Option<Id> {
+    pub fn parse_id(c: &mut parser::ParseContext) -> Result<Option<Id>, parser::Error> {
         let id = match &c.cur_token.r#type {
             TokenType::ID(v) => Some(v.clone()),
             _ => None,
         };
         match id {
-            Some(_) => c.next_token(),
+            Some(_) => c.next_token()?,
             _ => {}
         }
-        id
+        Ok(id)
     }
     //6.4.1
-    pub fn parse_valtype(c: &mut ParseContext) -> Result<ValType, ParseError> {
+    pub fn parse_valtype(c: &mut parser::ParseContext) -> Result<ValType, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::I32 => {
                 c.expect_cur(&TokenType::I32)?;
@@ -374,42 +384,39 @@ impl ModuleParser {
                 c.expect_cur(&TokenType::F64)?;
                 Ok(ValType::r#f64)
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.4.2
-    pub fn parse_functype(c: &mut ParseContext) -> Result<FuncType, ParseError> {
+    pub fn parse_functype(c: &mut parser::ParseContext) -> Result<FuncType, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::FUNC)?;
-        let mut params: Vec<Param> = vec![];
+        let mut ts1: Vec<Param> = vec![];
         while c.peek_token_is(&TokenType::PARAM) {
             let mut ps = Self::parse_param(c)?;
-            params.append(&mut ps);
+            ts1.append(&mut ps);
         }
-        let mut results: Vec<ValType> = vec![];
+        let mut ts2: Vec<ValType> = vec![];
         while c.peek_token_is(&TokenType::RESULT) {
             let mut rs = Self::parse_result(c)?;
-            results.append(&mut rs);
+            ts2.append(&mut rs);
         }
         c.expect_cur(&TokenType::RPAREN)?;
         Ok(FuncType {
-            params: params.iter().map(|param| param.valtype.clone()).collect(),
-            results: results,
+            params: ts1.iter().map(|param| param.valtype.clone()).collect(),
+            results: ts2,
         })
     }
-    fn parse_param(c: &mut ParseContext) -> Result<Vec<Param>, ParseError> {
+    fn parse_param(c: &mut parser::ParseContext) -> Result<Vec<Param>, parser::Error> {
         let mut params: Vec<Param> = vec![];
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::PARAM)?;
         match &c.cur_token.r#type {
             TokenType::ID(_) => {
-                let id = Self::parse_id(c);
-                let valtype = Self::parse_valtype(c)?;
+                let id = Self::parse_id(c)?;
+                let t = Self::parse_valtype(c)?;
                 c.expect_cur(&TokenType::RPAREN)?;
-                Ok(vec![Param {
-                    id: id,
-                    valtype: valtype,
-                }])
+                Ok(vec![Param { id: id, valtype: t }])
             }
             _ => {
                 loop {
@@ -417,7 +424,7 @@ impl ModuleParser {
                         break;
                     }
                     params.push(Param {
-                        id: Self::parse_id(c),
+                        id: Self::parse_id(c)?,
                         valtype: Self::parse_valtype(c)?,
                     })
                 }
@@ -426,7 +433,7 @@ impl ModuleParser {
             }
         }
     }
-    fn parse_result(c: &mut ParseContext) -> Result<Vec<ValType>, ParseError> {
+    fn parse_result(c: &mut parser::ParseContext) -> Result<Vec<ValType>, parser::Error> {
         let mut results: Vec<ValType> = vec![];
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::RESULT)?;
@@ -440,7 +447,7 @@ impl ModuleParser {
         Ok(results)
     }
     //6.4.3
-    fn parse_limits(c: &mut ParseContext) -> Result<Limits, ParseError> {
+    fn parse_limits(c: &mut parser::ParseContext) -> Result<Limits, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::NUM(_) => {
                 let min = Self::parse_u32(c)?;
@@ -450,17 +457,17 @@ impl ModuleParser {
                 };
                 Ok(Limits { min: min, max: max })
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.4.4
-    fn parse_memtype(c: &mut ParseContext) -> Result<MemType, ParseError> {
+    fn parse_memtype(c: &mut parser::ParseContext) -> Result<MemType, parser::Error> {
         Ok(MemType {
             limits: Self::parse_limits(c)?,
         })
     }
     //6.4.5
-    pub fn parse_tabletype(c: &mut ParseContext) -> Result<TableType, ParseError> {
+    pub fn parse_tabletype(c: &mut parser::ParseContext) -> Result<TableType, parser::Error> {
         let limits = Self::parse_limits(c)?;
         let elemtype = Self::parse_elemtype(c)?;
         Ok(TableType {
@@ -468,17 +475,17 @@ impl ModuleParser {
             elemtype: elemtype,
         })
     }
-    pub fn parse_elemtype(c: &mut ParseContext) -> Result<ElemType, ParseError> {
+    pub fn parse_elemtype(c: &mut parser::ParseContext) -> Result<ElemType, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::FUNCREF => {
                 c.expect_cur(&TokenType::FUNCREF)?;
                 Ok(ElemType::FuncRef)
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.4.6
-    fn parse_globaltype(c: &mut ParseContext) -> Result<GlobalType, ParseError> {
+    fn parse_globaltype(c: &mut parser::ParseContext) -> Result<GlobalType, parser::Error> {
         if c.cur_token_is(&TokenType::LPAREN) {
             c.expect_cur(&TokenType::LPAREN)?;
             c.expect_cur(&TokenType::MUT)?;
@@ -498,10 +505,10 @@ impl ModuleParser {
     }
     //6.5.1
     fn parse_label(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         I: &mut IdentifierContext,
-    ) -> Result<IdentifierContext, ParseError> {
-        let id = Self::parse_id(c);
+    ) -> Result<IdentifierContext, parser::Error> {
+        let id = Self::parse_id(c)?;
         let mut I1 = I.clone();
         if let Some(v) = id {
             I1.labels.insert(0, Some(v));
@@ -512,10 +519,10 @@ impl ModuleParser {
     }
     //6.5
     pub fn parse_instr(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<Vec<Instr>, ParseError> {
+    ) -> Result<Vec<Instr>, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::LPAREN => {
                 c.expect_cur(&TokenType::LPAREN)?;
@@ -626,13 +633,13 @@ impl ModuleParser {
         }
     }
     fn parse_blocktype(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<BlockType, ParseError> {
+    ) -> Result<BlockType, parser::Error> {
         let (x, I1) = Self::parse_typeuse(c, module, I)?;
         if I1.typedefs.len() == 0 {
-            Ok(BlockType::x(x))
+            Ok(BlockType::typeidx(x))
         } else if I.typedefs[x as usize].results.len() == 1 {
             Ok(BlockType::valtype(Some(
                 I.typedefs[x as usize].results[0].clone(),
@@ -640,14 +647,14 @@ impl ModuleParser {
         } else if I.typedefs[x as usize].results.len() == 0 {
             Ok(BlockType::valtype(None))
         } else {
-            Err(ParseError::ParseError(c.cur_token.clone()))
+            Err(parser::Error::ParseError(c.cur_token.clone()))
         }
     }
     fn parse_blockinstr(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<Instr, ParseError> {
+    ) -> Result<Instr, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::BLOCK => {
                 c.expect_cur(&TokenType::BLOCK)?;
@@ -662,7 +669,16 @@ impl ModuleParser {
                     ins.append(&mut instr);
                 }
                 c.expect_cur(&TokenType::END)?;
-                let id = Self::parse_id(c);
+                let id = Self::parse_id(c)?;
+                match id {
+                    None => {}
+                    _ => {
+                        if id != *I1.labels.last().clone().unwrap() {
+                            return Err(parser::Error::ParseError(c.cur_token.clone()));
+                        }
+                    }
+                }
+
                 Ok(Instr::block {
                     blocktype: bt,
                     instrs: ins,
@@ -681,7 +697,16 @@ impl ModuleParser {
                     ins.append(&mut instr);
                 }
                 c.expect_cur(&TokenType::END)?;
-                let id = Self::parse_id(c);
+                let id = Self::parse_id(c)?;
+                match id {
+                    None => {}
+                    _ => {
+                        if id != *I1.labels.last().clone().unwrap() {
+                            return Err(parser::Error::ParseError(c.cur_token.clone()));
+                        }
+                    }
+                }
+
                 Ok(Instr::r#loop {
                     blocktype: bt,
                     instrs: ins,
@@ -700,7 +725,7 @@ impl ModuleParser {
                     ins1.append(&mut instr);
                 }
                 c.expect_cur(&TokenType::ELSE)?;
-                let id1 = Self::parse_id(c);
+                let id1 = Self::parse_id(c)?;
                 let mut ins2: Vec<Instr> = vec![];
                 loop {
                     if c.cur_token_is(&TokenType::END) {
@@ -710,33 +735,57 @@ impl ModuleParser {
                     ins2.append(&mut instr);
                 }
                 c.expect_cur(&TokenType::END)?;
-                let id2 = Self::parse_id(c);
+                let id2 = Self::parse_id(c)?;
+                match id1 {
+                    None => {}
+                    _ => {
+                        if id1 != *I1.labels.last().clone().unwrap() {
+                            return Err(parser::Error::ParseError(c.cur_token.clone()));
+                        }
+                    }
+                }
+                match id2 {
+                    None => {}
+                    _ => {
+                        if id2 != *I1.labels.last().clone().unwrap() {
+                            return Err(parser::Error::ParseError(c.cur_token.clone()));
+                        }
+                    }
+                }
+
                 Ok(Instr::r#if {
                     blocktype: bt,
                     instrs1: ins1,
                     instrs2: ins2,
                 })
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     fn parse_plaininstr(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<Instr, ParseError> {
+    ) -> Result<Instr, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => match &keyword[..] {
                 // 6.5.2
-                "unreachable" => process_instr!(c, Instr::unreachable),
-                "nop" => process_instr!(c, Instr::nop),
-                "br" => process_instr!(c, Instr::br(Self::parse_labelidx(c, I)?)),
-                "br_if" => process_instr!(c, Instr::br_if(Self::parse_labelidx(c, I)?)),
+                "unreachable" => Self::process_instr(c, Instr::unreachable),
+                "nop" => Self::process_instr(c, Instr::nop),
+                "br" => {
+                    c.next_token()?;
+                    Ok(Instr::br(Self::parse_labelidx(c, I)?))
+                }
+                "br_if" => {
+                    c.next_token()?;
+                    let instr = Instr::br_if(Self::parse_labelidx(c, I)?);
+                    Ok(instr)
+                }
                 "br_table" => {
                     c.expect_cur(&TokenType::KEYWORD("br_table".to_string()))?;
                     let mut labelidxes = Self::parse_vec_labelidx(c, I)?;
                     if labelidxes.len() < 1 {
-                        return Err(ParseError::ParseError(c.cur_token.clone()));
+                        return Err(parser::Error::ParseError(c.cur_token.clone()));
                     }
                     let labelidx = labelidxes.remove(labelidxes.len() - 1);
                     Ok(Instr::br_table {
@@ -744,210 +793,331 @@ impl ModuleParser {
                         labelidx: labelidx,
                     })
                 }
-                "return" => process_instr!(c, Instr::r#return),
-                "call" => process_instr!(c, Instr::call(Self::parse_funcidx(c, I)?)),
-                "call_indirect" => process_instr!(
-                    c,
-                    Instr::call_indirect(Self::parse_typeuse(c, module, I)?.0)
-                ),
+                "return" => Self::process_instr(c, Instr::r#return),
+                "call" => {
+                    c.next_token()?;
+                    let instr = Instr::call(Self::parse_funcidx(c, I)?);
+                    Ok(instr)
+                }
+                "call_indirect" => {
+                    c.next_token()?;
+                    let instr = Instr::call_indirect(Self::parse_typeuse(c, module, I)?.0);
+                    Ok(instr)
+                }
                 //6.5.3
-                "drop" => process_instr!(c, Instr::drop),
-                "select" => process_instr!(c, Instr::select),
+                "drop" => Self::process_instr(c, Instr::drop),
+                "select" => Self::process_instr(c, Instr::select),
                 //6.5.4
-                "local.get" => process_instr!(c, Instr::local_get(Self::parse_localidx(c, I)?)),
-                "local.set" => process_instr!(c, Instr::local_set(Self::parse_localidx(c, I)?)),
-                "local.tee" => process_instr!(c, Instr::local_tee(Self::parse_localidx(c, I)?)),
-                "global.get" => process_instr!(c, Instr::global_get(Self::parse_localidx(c, I)?)),
-                "global.set" => process_instr!(c, Instr::global_set(Self::parse_localidx(c, I)?)),
+                "local.get" => {
+                    c.next_token()?;
+                    let instr = Instr::local_get(Self::parse_localidx(c, I)?);
+                    Ok(instr)
+                }
+                "local.set" => {
+                    c.next_token()?;
+                    let instr = Instr::local_set(Self::parse_localidx(c, I)?);
+                    Ok(instr)
+                }
+                "local.tee" => {
+                    c.next_token()?;
+                    let instr = Instr::local_tee(Self::parse_localidx(c, I)?);
+                    Ok(instr)
+                }
+                "global.get" => {
+                    c.next_token()?;
+                    let instr = Instr::global_get(Self::parse_globalidx(c, I)?);
+                    Ok(instr)
+                }
+                "global.set" => {
+                    c.next_token()?;
+                    let instr = Instr::global_set(Self::parse_globalidx(c, I)?);
+                    Ok(instr)
+                }
                 //6.5.5
-                "i32.load" => process_instr!(c, Instr::i32_load(Self::parse_memarg::<4>(c)?)),
-                "i64.load" => process_instr!(c, Instr::i64_load(Self::parse_memarg::<8>(c)?)),
-                "f32.load" => process_instr!(c, Instr::f32_load(Self::parse_memarg::<4>(c)?)),
-                "f64.load" => process_instr!(c, Instr::f64_load(Self::parse_memarg::<8>(c)?)),
-                "i32.load8_s" => process_instr!(c, Instr::i32_load8_s(Self::parse_memarg::<1>(c)?)),
-                "i32.load8_u" => process_instr!(c, Instr::i32_load8_u(Self::parse_memarg::<1>(c)?)),
+                "i32.load" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_load(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
+                }
+                "i64.load" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_load(Self::parse_memarg::<8>(c)?);
+                    Ok(instr)
+                }
+                "f32.load" => {
+                    c.next_token()?;
+                    let instr = Instr::f32_load(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
+                }
+                "f64.load" => {
+                    c.next_token()?;
+                    let instr = Instr::f64_load(Self::parse_memarg::<8>(c)?);
+                    Ok(instr)
+                }
+                "i32.load8_s" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_load8_s(Self::parse_memarg::<1>(c)?);
+                    Ok(instr)
+                }
+                "i32.load8_u" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_load8_u(Self::parse_memarg::<1>(c)?);
+                    Ok(instr)
+                }
                 "i32.load16_s" => {
-                    process_instr!(c, Instr::i32_load16_s(Self::parse_memarg::<2>(c)?))
+                    c.next_token()?;
+                    let instr = Instr::i32_load16_s(Self::parse_memarg::<2>(c)?);
+                    Ok(instr)
                 }
                 "i32.load16_u" => {
-                    process_instr!(c, Instr::i32_load16_u(Self::parse_memarg::<2>(c)?))
+                    c.next_token()?;
+                    let instr = Instr::i32_load16_u(Self::parse_memarg::<2>(c)?);
+                    Ok(instr)
                 }
-                "i64.load8_s" => process_instr!(c, Instr::i64_load8_s(Self::parse_memarg::<1>(c)?)),
-                "i64.load8_u" => process_instr!(c, Instr::i64_load8_u(Self::parse_memarg::<1>(c)?)),
+                "i64.load8_s" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_load8_s(Self::parse_memarg::<1>(c)?);
+                    Ok(instr)
+                }
+                "i64.load8_u" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_load8_u(Self::parse_memarg::<1>(c)?);
+                    Ok(instr)
+                }
                 "i64.load16_s" => {
-                    process_instr!(c, Instr::i64_load16_s(Self::parse_memarg::<2>(c)?))
+                    c.next_token()?;
+                    let instr = Instr::i64_load16_s(Self::parse_memarg::<2>(c)?);
+                    Ok(instr)
                 }
                 "i64.load16_u" => {
-                    process_instr!(c, Instr::i64_load16_u(Self::parse_memarg::<2>(c)?))
+                    c.next_token()?;
+                    let instr = Instr::i64_load16_u(Self::parse_memarg::<2>(c)?);
+                    Ok(instr)
                 }
                 "i64.load32_s" => {
-                    process_instr!(c, Instr::i64_load32_s(Self::parse_memarg::<4>(c)?))
+                    c.next_token()?;
+                    let instr = Instr::i64_load32_s(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
                 }
                 "i64.load32_u" => {
-                    process_instr!(c, Instr::i64_load32_u(Self::parse_memarg::<4>(c)?))
+                    c.next_token()?;
+                    let instr = Instr::i64_load32_u(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
                 }
-                "i32.store" => process_instr!(c, Instr::i32_store(Self::parse_memarg::<4>(c)?)),
-                "i64.store" => process_instr!(c, Instr::i64_store(Self::parse_memarg::<8>(c)?)),
-                "f32.store" => process_instr!(c, Instr::f32_store(Self::parse_memarg::<4>(c)?)),
-                "f64.store" => process_instr!(c, Instr::f64_store(Self::parse_memarg::<8>(c)?)),
-                "i32.store8" => process_instr!(c, Instr::i32_store8(Self::parse_memarg::<1>(c)?)),
-                "i32.store16" => process_instr!(c, Instr::i32_store16(Self::parse_memarg::<2>(c)?)),
-                "i64.store8" => process_instr!(c, Instr::i64_store8(Self::parse_memarg::<1>(c)?)),
-                "i64.store16" => process_instr!(c, Instr::i64_store16(Self::parse_memarg::<2>(c)?)),
-                "i64.store32" => process_instr!(c, Instr::i64_store32(Self::parse_memarg::<4>(c)?)),
-                "memory.size" => process_instr!(c, Instr::memory_size),
-                "memory.grow" => process_instr!(c, Instr::memory_grow),
+                "i32.store" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_store(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
+                }
+                "i64.store" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_store(Self::parse_memarg::<8>(c)?);
+                    Ok(instr)
+                }
+                "f32.store" => {
+                    c.next_token()?;
+                    let instr = Instr::f32_store(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
+                }
+                "f64.store" => {
+                    c.next_token()?;
+                    let instr = Instr::f64_store(Self::parse_memarg::<8>(c)?);
+                    Ok(instr)
+                }
+                "i32.store8" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_store8(Self::parse_memarg::<1>(c)?);
+                    Ok(instr)
+                }
+                "i32.store16" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_store16(Self::parse_memarg::<2>(c)?);
+                    Ok(instr)
+                }
+                "i64.store8" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_store8(Self::parse_memarg::<1>(c)?);
+                    Ok(instr)
+                }
+                "i64.store16" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_store16(Self::parse_memarg::<2>(c)?);
+                    Ok(instr)
+                }
+                "i64.store32" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_store32(Self::parse_memarg::<4>(c)?);
+                    Ok(instr)
+                }
+                "memory.size" => Self::process_instr(c, Instr::memory_size),
+                "memory.grow" => Self::process_instr(c, Instr::memory_grow),
                 //6.5.6
-                "i32.const" => process_instr!(c, Instr::i32_const(Self::parse_i32(c)?)),
-                "i64.const" => process_instr!(c, Instr::i64_const(Self::parse_i64(c)?)),
-                "f32.const" => process_instr!(c, Instr::f32_const(Self::parse_f32(c)?)),
-                "f64.const" => process_instr!(c, Instr::f64_const(Self::parse_f64(c)?)),
-                "i32.clz" => process_instr!(c, Instr::i32_clz),
-                "i32.ctz" => process_instr!(c, Instr::i32_ctz),
-                "i32.popcnt" => process_instr!(c, Instr::i32_popcnt),
-                "i32.add" => process_instr!(c, Instr::i32_add),
-                "i32.sub" => process_instr!(c, Instr::i32_sub),
-                "i32.mul" => process_instr!(c, Instr::i32_mul),
-                "i32.div_s" => process_instr!(c, Instr::i32_div_s),
-                "i32.div_u" => process_instr!(c, Instr::i32_div_u),
-                "i32.rem_s" => process_instr!(c, Instr::i32_rem_s),
-                "i32.rem_u" => process_instr!(c, Instr::i32_rem_u),
-                "i32.and" => process_instr!(c, Instr::i32_and),
-                "i32.or" => process_instr!(c, Instr::i32_or),
-                "i32.xor" => process_instr!(c, Instr::i32_xor),
-                "i32.shl" => process_instr!(c, Instr::i32_shl),
-                "i32.shr_s" => process_instr!(c, Instr::i32_shr_s),
-                "i32.shr_u" => process_instr!(c, Instr::i32_shr_u),
-                "i32.rotl" => process_instr!(c, Instr::i32_rotl),
-                "i32.rotr" => process_instr!(c, Instr::i32_rotr),
-                "i64.clz" => process_instr!(c, Instr::i64_clz),
-                "i64.ctz" => process_instr!(c, Instr::i64_ctz),
-                "i64.popcnt" => process_instr!(c, Instr::i64_popcnt),
-                "i64.add" => process_instr!(c, Instr::i64_add),
-                "i64.sub" => process_instr!(c, Instr::i64_sub),
-                "i64.mul" => process_instr!(c, Instr::i64_mul),
-                "i64.div_s" => process_instr!(c, Instr::i64_div_s),
-                "i64.div_u" => process_instr!(c, Instr::i64_div_u),
-                "i64.rem_s" => process_instr!(c, Instr::i64_rem_s),
-                "i64.rem_u" => process_instr!(c, Instr::i64_rem_u),
-                "i64.and" => process_instr!(c, Instr::i64_and),
-                "i64.or" => process_instr!(c, Instr::i64_or),
-                "i64.xor" => process_instr!(c, Instr::i64_xor),
-                "i64.shl" => process_instr!(c, Instr::i64_shl),
-                "i64.shr_s" => process_instr!(c, Instr::i64_shr_s),
-                "i64.shr_u" => process_instr!(c, Instr::i64_shr_u),
-                "i64.rotl" => process_instr!(c, Instr::i64_rotl),
-                "i64.rotr" => process_instr!(c, Instr::i64_rotr),
-                "f32.abs" => process_instr!(c, Instr::f32_abs),
-                "f32.neg" => process_instr!(c, Instr::f32_neg),
-                "f32.ceil" => process_instr!(c, Instr::f32_ceil),
-                "f32.floor" => process_instr!(c, Instr::f32_floor),
-                "f32.trunc" => process_instr!(c, Instr::f32_trunc),
-                "f32.nearest" => process_instr!(c, Instr::f32_nearest),
-                "f32.sqrt" => process_instr!(c, Instr::f32_sqrt),
-                "f32.add" => process_instr!(c, Instr::f32_add),
-                "f32.sub" => process_instr!(c, Instr::f32_sub),
-                "f32.mul" => process_instr!(c, Instr::f32_mul),
-                "f32.div" => process_instr!(c, Instr::f32_div),
-                "f32.min" => process_instr!(c, Instr::f32_min),
-                "f32.max" => process_instr!(c, Instr::f32_max),
-                "f32.copysign" => process_instr!(c, Instr::f32_copysign),
-                "f64.abs" => process_instr!(c, Instr::f64_abs),
-                "f64.neg" => process_instr!(c, Instr::f64_neg),
-                "f64.ceil" => process_instr!(c, Instr::f64_ceil),
-                "f64.floor" => process_instr!(c, Instr::f64_floor),
-                "f64.trunc" => process_instr!(c, Instr::f64_trunc),
-                "f64.nearest" => process_instr!(c, Instr::f64_nearest),
-                "f64.sqrt" => process_instr!(c, Instr::f64_sqrt),
-                "f64.add" => process_instr!(c, Instr::f64_add),
-                "f64.sub" => process_instr!(c, Instr::f64_sub),
-                "f64.mul" => process_instr!(c, Instr::f64_mul),
-                "f64.div" => process_instr!(c, Instr::f64_div),
-                "f64.min" => process_instr!(c, Instr::f64_min),
-                "f64.max" => process_instr!(c, Instr::f64_max),
-                "f64.copysign" => process_instr!(c, Instr::f64_copysign),
-                "i32.eqz" => process_instr!(c, Instr::i32_eqz),
-                "i32.eq" => process_instr!(c, Instr::i32_eq),
-                "i32.ne" => process_instr!(c, Instr::i32_ne),
-                "i32.lt_s" => process_instr!(c, Instr::i32_lt_s),
-                "i32.lt_u" => process_instr!(c, Instr::i32_lt_u),
-                "i32.gt_s" => process_instr!(c, Instr::i32_gt_s),
-                "i32.gt_u" => process_instr!(c, Instr::i32_gt_u),
-                "i32.le_s" => process_instr!(c, Instr::i32_le_s),
-                "i32.le_u" => process_instr!(c, Instr::i32_le_u),
-                "i32.ge_s" => process_instr!(c, Instr::i32_ge_s),
-                "i32.ge_u" => process_instr!(c, Instr::i32_ge_u),
-                "i64.eqz" => process_instr!(c, Instr::i64_eqz),
-                "i64.eq" => process_instr!(c, Instr::i64_eq),
-                "i64.ne" => process_instr!(c, Instr::i64_ne),
-                "i64.lt_s" => process_instr!(c, Instr::i64_lt_s),
-                "i64.lt_u" => process_instr!(c, Instr::i64_lt_u),
-                "i64.gt_s" => process_instr!(c, Instr::i64_gt_s),
-                "i64.gt_u" => process_instr!(c, Instr::i64_gt_u),
-                "i64.le_s" => process_instr!(c, Instr::i64_le_s),
-                "i64.le_u" => process_instr!(c, Instr::i64_le_u),
-                "i64.ge_s" => process_instr!(c, Instr::i64_ge_s),
-                "i64.ge_u" => process_instr!(c, Instr::i64_ge_u),
-                "f32.eq" => process_instr!(c, Instr::f32_eq),
-                "f32.ne" => process_instr!(c, Instr::f32_ne),
-                "f32.lt" => process_instr!(c, Instr::f32_lt),
-                "f32.gt" => process_instr!(c, Instr::f32_gt),
-                "f32.le" => process_instr!(c, Instr::f32_le),
-                "f32.ge" => process_instr!(c, Instr::f32_ge),
-                "f64.eq" => process_instr!(c, Instr::f64_eq),
-                "f64.ne" => process_instr!(c, Instr::f64_ne),
-                "f64.lt" => process_instr!(c, Instr::f64_lt),
-                "f64.gt" => process_instr!(c, Instr::f64_gt),
-                "f64.le" => process_instr!(c, Instr::f64_le),
-                "f64.ge" => process_instr!(c, Instr::f64_ge),
-                "i32.wrap_i64" => process_instr!(c, Instr::i32_wrap_i64),
-                "i32.trunc_f32_s" => process_instr!(c, Instr::i32_trunc_f32_s),
-                "i32.trunc_f32_u" => process_instr!(c, Instr::i32_trunc_f32_u),
-                "i32.trunc_f64_s" => process_instr!(c, Instr::i32_trunc_f64_s),
-                "i32.trunc_f64_u" => process_instr!(c, Instr::i32_trunc_f64_u),
-                "i32.trunc_sat_f32_s" => process_instr!(c, Instr::i32_trunc_sat_f32_s),
-                "i32.trunc_sat_f32_u" => process_instr!(c, Instr::i32_trunc_sat_f32_u),
-                "i32.trunc_sat_f64_s" => process_instr!(c, Instr::i32_trunc_sat_f64_s),
-                "i32.trunc_sat_f64_u" => process_instr!(c, Instr::i32_trunc_sat_f64_u),
-                "i64.extend_i32_s" => process_instr!(c, Instr::i64_extend_i32_s),
-                "i64.extend_i32_u" => process_instr!(c, Instr::i64_extend_i32_u),
-                "i64.trunc_f32_s" => process_instr!(c, Instr::i64_trunc_f32_s),
-                "i64.trunc_f32_u" => process_instr!(c, Instr::i64_trunc_f32_u),
-                "i64.trunc_f64_s" => process_instr!(c, Instr::i64_trunc_f64_s),
-                "i64.trunc_f64_u" => process_instr!(c, Instr::i64_trunc_f64_u),
-                "i64.trunc_sat_f32_s" => process_instr!(c, Instr::i64_trunc_sat_f32_s),
-                "i64.trunc_sat_f32_u" => process_instr!(c, Instr::i64_trunc_sat_f32_u),
-                "i64.trunc_sat_f64_s" => process_instr!(c, Instr::i64_trunc_sat_f64_s),
-                "i64.trunc_sat_f64_u" => process_instr!(c, Instr::i64_trunc_sat_f64_u),
-                "f32.convert_i32_s" => process_instr!(c, Instr::f32_convert_i32_s),
-                "f32.convert_i32_u" => process_instr!(c, Instr::f32_convert_i32_u),
-                "f32.convert_i64_s" => process_instr!(c, Instr::f32_convert_i64_s),
-                "f32.convert_i64_u" => process_instr!(c, Instr::f32_convert_i64_u),
-                "f32.demote_f64" => process_instr!(c, Instr::f32_demote_f64),
-                "f64.convert_i32_s" => process_instr!(c, Instr::f64_convert_i32_s),
-                "f64.convert_i32_u" => process_instr!(c, Instr::f64_convert_i32_u),
-                "f64.convert_i64_s" => process_instr!(c, Instr::f64_convert_i64_s),
-                "f64.convert_i64_u" => process_instr!(c, Instr::f64_convert_i64_u),
-                "f64.promote_f32" => process_instr!(c, Instr::f64_promote_f32),
-                "i32.reinterpret_f32" => process_instr!(c, Instr::i32_reinterpret_f32),
-                "i64.reinterpret_f64" => process_instr!(c, Instr::i64_reinterpret_f64),
-                "f32.reinterpret_i32" => process_instr!(c, Instr::f32_reinterpret_i32),
-                "f64.reinterpret_i64" => process_instr!(c, Instr::f64_reinterpret_i64),
-                "i32.extend8_s" => process_instr!(c, Instr::i32_extend8_s),
-                "i32.extend16_s" => process_instr!(c, Instr::i32_extend16_s),
-                "i64.extend8_s" => process_instr!(c, Instr::i64_extend8_s),
-                "i64.extend16_s" => process_instr!(c, Instr::i64_extend16_s),
-                "i64.extend32_s" => process_instr!(c, Instr::i64_extend32_s),
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                "i32.const" => {
+                    c.next_token()?;
+                    let instr = Instr::i32_const(Self::parse_i32(c)?);
+                    Ok(instr)
+                }
+                "i64.const" => {
+                    c.next_token()?;
+                    let instr = Instr::i64_const(Self::parse_i64(c)?);
+                    Ok(instr)
+                }
+                "f32.const" => {
+                    c.next_token()?;
+                    let instr = Instr::f32_const(Self::parse_f32(c)?);
+                    Ok(instr)
+                }
+                "f64.const" => {
+                    c.next_token()?;
+                    let instr = Instr::f64_const(Self::parse_f64(c)?);
+                    Ok(instr)
+                }
+                "i32.clz" => Self::process_instr(c, Instr::i32_clz),
+                "i32.ctz" => Self::process_instr(c, Instr::i32_ctz),
+                "i32.popcnt" => Self::process_instr(c, Instr::i32_popcnt),
+                "i32.add" => Self::process_instr(c, Instr::i32_add),
+                "i32.sub" => Self::process_instr(c, Instr::i32_sub),
+                "i32.mul" => Self::process_instr(c, Instr::i32_mul),
+                "i32.div_s" => Self::process_instr(c, Instr::i32_div_s),
+                "i32.div_u" => Self::process_instr(c, Instr::i32_div_u),
+                "i32.rem_s" => Self::process_instr(c, Instr::i32_rem_s),
+                "i32.rem_u" => Self::process_instr(c, Instr::i32_rem_u),
+                "i32.and" => Self::process_instr(c, Instr::i32_and),
+                "i32.or" => Self::process_instr(c, Instr::i32_or),
+                "i32.xor" => Self::process_instr(c, Instr::i32_xor),
+                "i32.shl" => Self::process_instr(c, Instr::i32_shl),
+                "i32.shr_s" => Self::process_instr(c, Instr::i32_shr_s),
+                "i32.shr_u" => Self::process_instr(c, Instr::i32_shr_u),
+                "i32.rotl" => Self::process_instr(c, Instr::i32_rotl),
+                "i32.rotr" => Self::process_instr(c, Instr::i32_rotr),
+                "i64.clz" => Self::process_instr(c, Instr::i64_clz),
+                "i64.ctz" => Self::process_instr(c, Instr::i64_ctz),
+                "i64.popcnt" => Self::process_instr(c, Instr::i64_popcnt),
+                "i64.add" => Self::process_instr(c, Instr::i64_add),
+                "i64.sub" => Self::process_instr(c, Instr::i64_sub),
+                "i64.mul" => Self::process_instr(c, Instr::i64_mul),
+                "i64.div_s" => Self::process_instr(c, Instr::i64_div_s),
+                "i64.div_u" => Self::process_instr(c, Instr::i64_div_u),
+                "i64.rem_s" => Self::process_instr(c, Instr::i64_rem_s),
+                "i64.rem_u" => Self::process_instr(c, Instr::i64_rem_u),
+                "i64.and" => Self::process_instr(c, Instr::i64_and),
+                "i64.or" => Self::process_instr(c, Instr::i64_or),
+                "i64.xor" => Self::process_instr(c, Instr::i64_xor),
+                "i64.shl" => Self::process_instr(c, Instr::i64_shl),
+                "i64.shr_s" => Self::process_instr(c, Instr::i64_shr_s),
+                "i64.shr_u" => Self::process_instr(c, Instr::i64_shr_u),
+                "i64.rotl" => Self::process_instr(c, Instr::i64_rotl),
+                "i64.rotr" => Self::process_instr(c, Instr::i64_rotr),
+                "f32.abs" => Self::process_instr(c, Instr::f32_abs),
+                "f32.neg" => Self::process_instr(c, Instr::f32_neg),
+                "f32.ceil" => Self::process_instr(c, Instr::f32_ceil),
+                "f32.floor" => Self::process_instr(c, Instr::f32_floor),
+                "f32.trunc" => Self::process_instr(c, Instr::f32_trunc),
+                "f32.nearest" => Self::process_instr(c, Instr::f32_nearest),
+                "f32.sqrt" => Self::process_instr(c, Instr::f32_sqrt),
+                "f32.add" => Self::process_instr(c, Instr::f32_add),
+                "f32.sub" => Self::process_instr(c, Instr::f32_sub),
+                "f32.mul" => Self::process_instr(c, Instr::f32_mul),
+                "f32.div" => Self::process_instr(c, Instr::f32_div),
+                "f32.min" => Self::process_instr(c, Instr::f32_min),
+                "f32.max" => Self::process_instr(c, Instr::f32_max),
+                "f32.copysign" => Self::process_instr(c, Instr::f32_copysign),
+                "f64.abs" => Self::process_instr(c, Instr::f64_abs),
+                "f64.neg" => Self::process_instr(c, Instr::f64_neg),
+                "f64.ceil" => Self::process_instr(c, Instr::f64_ceil),
+                "f64.floor" => Self::process_instr(c, Instr::f64_floor),
+                "f64.trunc" => Self::process_instr(c, Instr::f64_trunc),
+                "f64.nearest" => Self::process_instr(c, Instr::f64_nearest),
+                "f64.sqrt" => Self::process_instr(c, Instr::f64_sqrt),
+                "f64.add" => Self::process_instr(c, Instr::f64_add),
+                "f64.sub" => Self::process_instr(c, Instr::f64_sub),
+                "f64.mul" => Self::process_instr(c, Instr::f64_mul),
+                "f64.div" => Self::process_instr(c, Instr::f64_div),
+                "f64.min" => Self::process_instr(c, Instr::f64_min),
+                "f64.max" => Self::process_instr(c, Instr::f64_max),
+                "f64.copysign" => Self::process_instr(c, Instr::f64_copysign),
+                "i32.eqz" => Self::process_instr(c, Instr::i32_eqz),
+                "i32.eq" => Self::process_instr(c, Instr::i32_eq),
+                "i32.ne" => Self::process_instr(c, Instr::i32_ne),
+                "i32.lt_s" => Self::process_instr(c, Instr::i32_lt_s),
+                "i32.lt_u" => Self::process_instr(c, Instr::i32_lt_u),
+                "i32.gt_s" => Self::process_instr(c, Instr::i32_gt_s),
+                "i32.gt_u" => Self::process_instr(c, Instr::i32_gt_u),
+                "i32.le_s" => Self::process_instr(c, Instr::i32_le_s),
+                "i32.le_u" => Self::process_instr(c, Instr::i32_le_u),
+                "i32.ge_s" => Self::process_instr(c, Instr::i32_ge_s),
+                "i32.ge_u" => Self::process_instr(c, Instr::i32_ge_u),
+                "i64.eqz" => Self::process_instr(c, Instr::i64_eqz),
+                "i64.eq" => Self::process_instr(c, Instr::i64_eq),
+                "i64.ne" => Self::process_instr(c, Instr::i64_ne),
+                "i64.lt_s" => Self::process_instr(c, Instr::i64_lt_s),
+                "i64.lt_u" => Self::process_instr(c, Instr::i64_lt_u),
+                "i64.gt_s" => Self::process_instr(c, Instr::i64_gt_s),
+                "i64.gt_u" => Self::process_instr(c, Instr::i64_gt_u),
+                "i64.le_s" => Self::process_instr(c, Instr::i64_le_s),
+                "i64.le_u" => Self::process_instr(c, Instr::i64_le_u),
+                "i64.ge_s" => Self::process_instr(c, Instr::i64_ge_s),
+                "i64.ge_u" => Self::process_instr(c, Instr::i64_ge_u),
+                "f32.eq" => Self::process_instr(c, Instr::f32_eq),
+                "f32.ne" => Self::process_instr(c, Instr::f32_ne),
+                "f32.lt" => Self::process_instr(c, Instr::f32_lt),
+                "f32.gt" => Self::process_instr(c, Instr::f32_gt),
+                "f32.le" => Self::process_instr(c, Instr::f32_le),
+                "f32.ge" => Self::process_instr(c, Instr::f32_ge),
+                "f64.eq" => Self::process_instr(c, Instr::f64_eq),
+                "f64.ne" => Self::process_instr(c, Instr::f64_ne),
+                "f64.lt" => Self::process_instr(c, Instr::f64_lt),
+                "f64.gt" => Self::process_instr(c, Instr::f64_gt),
+                "f64.le" => Self::process_instr(c, Instr::f64_le),
+                "f64.ge" => Self::process_instr(c, Instr::f64_ge),
+                "i32.wrap_i64" => Self::process_instr(c, Instr::i32_wrap_i64),
+                "i32.trunc_f32_s" => Self::process_instr(c, Instr::i32_trunc_f32_s),
+                "i32.trunc_f32_u" => Self::process_instr(c, Instr::i32_trunc_f32_u),
+                "i32.trunc_f64_s" => Self::process_instr(c, Instr::i32_trunc_f64_s),
+                "i32.trunc_f64_u" => Self::process_instr(c, Instr::i32_trunc_f64_u),
+                "i32.trunc_sat_f32_s" => Self::process_instr(c, Instr::i32_trunc_sat_f32_s),
+                "i32.trunc_sat_f32_u" => Self::process_instr(c, Instr::i32_trunc_sat_f32_u),
+                "i32.trunc_sat_f64_s" => Self::process_instr(c, Instr::i32_trunc_sat_f64_s),
+                "i32.trunc_sat_f64_u" => Self::process_instr(c, Instr::i32_trunc_sat_f64_u),
+                "i64.extend_i32_s" => Self::process_instr(c, Instr::i64_extend_i32_s),
+                "i64.extend_i32_u" => Self::process_instr(c, Instr::i64_extend_i32_u),
+                "i64.trunc_f32_s" => Self::process_instr(c, Instr::i64_trunc_f32_s),
+                "i64.trunc_f32_u" => Self::process_instr(c, Instr::i64_trunc_f32_u),
+                "i64.trunc_f64_s" => Self::process_instr(c, Instr::i64_trunc_f64_s),
+                "i64.trunc_f64_u" => Self::process_instr(c, Instr::i64_trunc_f64_u),
+                "i64.trunc_sat_f32_s" => Self::process_instr(c, Instr::i64_trunc_sat_f32_s),
+                "i64.trunc_sat_f32_u" => Self::process_instr(c, Instr::i64_trunc_sat_f32_u),
+                "i64.trunc_sat_f64_s" => Self::process_instr(c, Instr::i64_trunc_sat_f64_s),
+                "i64.trunc_sat_f64_u" => Self::process_instr(c, Instr::i64_trunc_sat_f64_u),
+                "f32.convert_i32_s" => Self::process_instr(c, Instr::f32_convert_i32_s),
+                "f32.convert_i32_u" => Self::process_instr(c, Instr::f32_convert_i32_u),
+                "f32.convert_i64_s" => Self::process_instr(c, Instr::f32_convert_i64_s),
+                "f32.convert_i64_u" => Self::process_instr(c, Instr::f32_convert_i64_u),
+                "f32.demote_f64" => Self::process_instr(c, Instr::f32_demote_f64),
+                "f64.convert_i32_s" => Self::process_instr(c, Instr::f64_convert_i32_s),
+                "f64.convert_i32_u" => Self::process_instr(c, Instr::f64_convert_i32_u),
+                "f64.convert_i64_s" => Self::process_instr(c, Instr::f64_convert_i64_s),
+                "f64.convert_i64_u" => Self::process_instr(c, Instr::f64_convert_i64_u),
+                "f64.promote_f32" => Self::process_instr(c, Instr::f64_promote_f32),
+                "i32.reinterpret_f32" => Self::process_instr(c, Instr::i32_reinterpret_f32),
+                "i64.reinterpret_f64" => Self::process_instr(c, Instr::i64_reinterpret_f64),
+                "f32.reinterpret_i32" => Self::process_instr(c, Instr::f32_reinterpret_i32),
+                "f64.reinterpret_i64" => Self::process_instr(c, Instr::f64_reinterpret_i64),
+                "i32.extend8_s" => Self::process_instr(c, Instr::i32_extend8_s),
+                "i32.extend16_s" => Self::process_instr(c, Instr::i32_extend16_s),
+                "i64.extend8_s" => Self::process_instr(c, Instr::i64_extend8_s),
+                "i64.extend16_s" => Self::process_instr(c, Instr::i64_extend16_s),
+                "i64.extend32_s" => Self::process_instr(c, Instr::i64_extend32_s),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
-            TokenType::END => process_instr!(c, Instr::end),
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            TokenType::END => Self::process_instr(c, Instr::end),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     fn parse_vec_labelidx(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         I: &mut IdentifierContext,
-    ) -> Result<Vec<u32>, ParseError> {
+    ) -> Result<Vec<u32>, parser::Error> {
         let mut labelidxes: Vec<u32> = vec![];
         loop {
             match &c.cur_token.r#type {
@@ -959,7 +1129,7 @@ impl ModuleParser {
         }
         Ok(labelidxes)
     }
-    fn parse_memarg<const N: u32>(c: &mut ParseContext) -> Result<MemArg, ParseError> {
+    fn parse_memarg<const N: u32>(c: &mut parser::ParseContext) -> Result<MemArg, parser::Error> {
         let mut offset = 0;
         let mut align = N;
         match &c.cur_token.r#type {
@@ -1005,32 +1175,37 @@ impl ModuleParser {
             }),
         }
     }
-    fn parse_offset(c: &mut ParseContext) -> Result<u32, ParseError> {
+    fn parse_offset(c: &mut parser::ParseContext) -> Result<u32, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => {
                 let s = keyword[7..].to_string();
-                c.next_token();
+                c.next_token()?;
                 Ok(Self::read_u32(s)?)
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
-    fn parse_align<const N: u32>(c: &mut ParseContext) -> Result<u32, ParseError> {
+    fn parse_align<const N: u32>(c: &mut parser::ParseContext) -> Result<u32, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => {
                 let s = keyword[6..].to_string();
-                c.next_token();
-                Ok(Self::read_u32(s)?)
+                c.next_token()?;
+                let align = Self::read_u32(s)?;
+                if align == 0 || (align & (align - 1)) != 0 {
+                    Err(parser::Error::Malformed(String::from("alignment")))
+                } else {
+                    Ok(align)
+                }
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.5.8
     pub fn parse_expr(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<Expr, ParseError> {
+    ) -> Result<Expr, parser::Error> {
         let mut instrs: Vec<Instr> = vec![];
         loop {
             if c.cur_token_is(&TokenType::END) || c.cur_token_is(&TokenType::RPAREN) {
@@ -1042,127 +1217,126 @@ impl ModuleParser {
         Ok(Expr { instrs: instrs })
     }
     //6.6.1
-    fn parse_idx(c: &mut ParseContext) -> Result<Idx, ParseError> {
+    fn parse_idx(c: &mut parser::ParseContext) -> Result<Idx, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::NUM(_) => Ok(Idx::x(Self::parse_u32(c)?)),
-            TokenType::ID(_) => Ok(Idx::v(Self::parse_id(c))),
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            TokenType::ID(_) => Ok(Idx::v(Self::parse_id(c)?)),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
-    fn parse_typeidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_typeidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.types.iter().position(|tid| *tid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.types.push(id);
-                    Ok(I.types.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
-    fn parse_funcidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_funcidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.funcs.iter().position(|fid| *fid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.funcs.push(id);
-                    Ok(I.funcs.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
-    fn parse_tableidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_tableidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.tables.iter().position(|tid| *tid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.tables.push(id);
-                    Ok(I.tables.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
-    fn parse_memidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_memidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.mems.iter().position(|mid| *mid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.mems.push(id);
-                    Ok(I.mems.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
-    fn parse_globalidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_globalidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.globals.iter().position(|gid| *gid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.globals.push(id);
-                    Ok(I.globals.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
-    fn parse_localidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_localidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.locals.iter().position(|lid| *lid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.locals.push(id);
-                    Ok(I.locals.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
-    fn parse_labelidx(c: &mut ParseContext, I: &mut IdentifierContext) -> Result<u32, ParseError> {
+    fn parse_labelidx(
+        c: &mut parser::ParseContext,
+        I: &mut IdentifierContext,
+    ) -> Result<u32, parser::Error> {
         let idx = Self::parse_idx(c)?;
         match idx {
             Idx::v(id) => match I.labels.iter().position(|lid| *lid == id) {
                 Some(x) => Ok(x as u32),
-                _ => {
-                    I.labels.push(id);
-                    Ok(I.labels.len() as u32)
-                }
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             Idx::x(x) => Ok(x),
         }
     }
     //6.6.2
     fn parse_types(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::TYPE)?;
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         let ft = Self::parse_functype(c)?;
         c.expect_cur(&TokenType::RPAREN)?;
 
-        I.types.push(id);
-        I.typedefs.push(ft.clone());
+        let typeidx = find_or_push_type(&ft, id, I);
         module.types.push(ft);
         Ok(())
     }
     //6.6.3
     pub fn parse_typeuse(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(u32, IdentifierContext), ParseError> {
+    ) -> Result<(u32, IdentifierContext), parser::Error> {
         if c.cur_token_is(&TokenType::LPAREN)
             && (c.peek_token_is(&TokenType::TYPE)
                 || c.peek_token_is(&TokenType::PARAM)
@@ -1170,27 +1344,46 @@ impl ModuleParser {
         {
             match &c.peek_token.r#type {
                 TokenType::PARAM => {
-                    let params = Self::parse_vec_param(c)?;
-                    let results = Self::parse_vec_result(c)?;
-
-                    let x = I.find_or_push_typedef(module, &params, &results);
+                    let ts1 = Self::parse_vec_param(c)?;
+                    let ts2 = Self::parse_vec_result(c)?;
+                    let x = find_or_push_type(
+                        &FuncType {
+                            params: ts1.iter().map(|param| param.valtype.clone()).collect(),
+                            results: ts2,
+                        },
+                        None,
+                        I,
+                    );
                     Ok((x, {
                         let mut I1 = IdentifierContext::new();
-                        for param in params.iter() {
-                            I1.locals.push(param.id.clone());
-                        }
+                        I1.locals.append(
+                            &mut ts1
+                                .iter()
+                                .map(|param| param.id.clone())
+                                .collect::<Vec<Option<Id>>>(),
+                        );
                         I1
                     }))
                 }
                 TokenType::RESULT => {
-                    let params: Vec<Param> = vec![];
-                    let results = Self::parse_vec_result(c)?;
-                    let x = I.find_or_push_typedef(module, &params, &results);
+                    let ts1: Vec<Param> = vec![];
+                    let ts2 = Self::parse_vec_result(c)?;
+                    let x = find_or_push_type(
+                        &FuncType {
+                            params: ts1.iter().map(|param| param.valtype.clone()).collect(),
+                            results: ts2,
+                        },
+                        None,
+                        I,
+                    );
                     Ok((x, {
                         let mut I1 = IdentifierContext::new();
-                        for param in params.iter() {
-                            I1.locals.push(param.id.clone());
-                        }
+                        I1.locals.append(
+                            &mut ts1
+                                .iter()
+                                .map(|param| param.id.clone())
+                                .collect::<Vec<Option<Id>>>(),
+                        );
                         I1
                     }))
                 }
@@ -1200,49 +1393,86 @@ impl ModuleParser {
                     if c.cur_token_is(&TokenType::LPAREN) {
                         c.expect_cur(&TokenType::LPAREN)?;
                         c.expect_cur(&TokenType::FUNC)?;
-                        let params = Self::parse_vec_param(c)?;
-                        let results = Self::parse_vec_result(c)?;
+                        let ts1 = Self::parse_vec_param(c)?;
+                        let ts2 = Self::parse_vec_result(c)?;
                         c.expect_cur(&TokenType::RPAREN)?;
                         c.expect_cur(&TokenType::RPAREN)?;
-                        let x = I.find_or_push_typedef(module, &params, &results);
+
+                        let x = find_or_push_type(
+                            &FuncType {
+                                params: ts1.iter().map(|param| param.valtype.clone()).collect(),
+                                results: ts2,
+                            },
+                            None,
+                            I,
+                        );
                         Ok((x, {
                             let mut I1 = IdentifierContext::new();
-                            for param in params.iter() {
-                                I1.locals.push(param.id.clone());
-                            }
+                            I1.locals.append(
+                                &mut ts1
+                                    .iter()
+                                    .map(|param| param.id.clone())
+                                    .collect::<Vec<Option<Id>>>(),
+                            );
                             I1
                         }))
                     } else {
                         let x = Self::parse_typeidx(c, I)?;
                         c.expect_cur(&TokenType::RPAREN)?;
-                        let params = Self::parse_vec_param(c)?;
-                        let results = Self::parse_vec_result(c)?;
-                        let x = I.find_or_push_typedef(module, &params, &results);
+                        let ts1 = Self::parse_vec_param(c)?;
+                        let ts2 = Self::parse_vec_result(c)?;
+
+                        let functype = I.typedefs[x as usize].clone();
+                        // TODO check
+                        // if functype.params
+                        //     != ts1
+                        //         .iter()
+                        //         .map(|param| param.valtype.clone())
+                        //         .collect::<Vec<ValType>>()
+                        //     || functype.results != ts2
+                        // {
+                        //     return Err(parser::Error::ParseError(c.cur_token.clone()));
+                        // }
+
                         Ok((x, {
                             let mut I1 = IdentifierContext::new();
-                            for param in params.iter() {
-                                I1.locals.push(param.id.clone());
-                            }
+                            I1.locals.append(
+                                &mut ts1
+                                    .iter()
+                                    .map(|param| param.id.clone())
+                                    .collect::<Vec<Option<Id>>>(),
+                            );
                             I1
                         }))
                     }
                 }
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             }
         } else {
-            let params: Vec<Param> = vec![];
-            let results: Vec<ValType> = vec![];
-            let x = I.find_or_push_typedef(module, &params, &results);
+            let ts1: Vec<Param> = vec![];
+            let ts2: Vec<ValType> = vec![];
+
+            let x = find_or_push_type(
+                &FuncType {
+                    params: ts1.iter().map(|param| param.valtype.clone()).collect(),
+                    results: ts2,
+                },
+                None,
+                I,
+            );
             Ok((x, {
                 let mut I1 = IdentifierContext::new();
-                for param in params.iter() {
-                    I1.locals.push(param.id.clone());
-                }
+                I1.locals.append(
+                    &mut ts1
+                        .iter()
+                        .map(|param| param.id.clone())
+                        .collect::<Vec<Option<Id>>>(),
+                );
                 I1
             }))
         }
     }
-    fn parse_vec_param(c: &mut ParseContext) -> Result<Vec<Param>, ParseError> {
+    fn parse_vec_param(c: &mut parser::ParseContext) -> Result<Vec<Param>, parser::Error> {
         let mut params: Vec<Param> = vec![];
         loop {
             if (!c.cur_token_is(&TokenType::LPAREN)) || (!c.peek_token_is(&TokenType::PARAM)) {
@@ -1253,7 +1483,7 @@ impl ModuleParser {
         }
         Ok(params)
     }
-    fn parse_vec_result(c: &mut ParseContext) -> Result<Vec<ValType>, ParseError> {
+    fn parse_vec_result(c: &mut parser::ParseContext) -> Result<Vec<ValType>, parser::Error> {
         let mut results: Vec<ValType> = vec![];
         loop {
             if (!c.cur_token_is(&TokenType::LPAREN)) || (!c.peek_token_is(&TokenType::RESULT)) {
@@ -1266,35 +1496,35 @@ impl ModuleParser {
     }
     //6.6.4
     fn parse_imports(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::IMPORT)?;
-        let module_name = Self::parse_name(c)?;
-        let name = Self::parse_name(c)?;
-        let desc = Self::parse_importdesc(c, module, I)?;
+        let r#mod = Self::parse_name(c)?;
+        let nm = Self::parse_name(c)?;
+        let d = Self::parse_importdesc(c, module, I)?;
         c.expect_cur(&TokenType::RPAREN)?;
 
         module.imports.push(Import {
-            module: module_name,
-            name: name,
-            desc: desc,
+            module: r#mod,
+            name: nm,
+            desc: d,
         });
         Ok(())
     }
     pub fn parse_importdesc(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<ImportDesc, ParseError> {
+    ) -> Result<ImportDesc, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         match &c.cur_token.r#type {
             TokenType::FUNC => {
                 c.expect_cur(&TokenType::FUNC)?;
-                let id = Self::parse_id(c);
-                let (x, _) = Self::parse_typeuse(c, module, I)?;
+                let id = Self::parse_id(c)?;
+                let (x, I1) = Self::parse_typeuse(c, module, I)?;
                 c.expect_cur(&TokenType::RPAREN)?;
 
                 I.funcs.push(id);
@@ -1302,7 +1532,7 @@ impl ModuleParser {
             }
             TokenType::TABLE => {
                 c.expect_cur(&TokenType::TABLE)?;
-                let id = Self::parse_id(c);
+                let id = Self::parse_id(c)?;
                 let tt = Self::parse_tabletype(c)?;
                 c.expect_cur(&TokenType::RPAREN)?;
 
@@ -1311,7 +1541,7 @@ impl ModuleParser {
             }
             TokenType::MEMORY => {
                 c.expect_cur(&TokenType::MEMORY)?;
-                let id = Self::parse_id(c);
+                let id = Self::parse_id(c)?;
                 let mt = Self::parse_memtype(c)?;
                 c.expect_cur(&TokenType::RPAREN)?;
 
@@ -1320,47 +1550,40 @@ impl ModuleParser {
             }
             TokenType::GLOBAL => {
                 c.expect_cur(&TokenType::GLOBAL)?;
-                let id = Self::parse_id(c);
+                let id = Self::parse_id(c)?;
                 let gt = Self::parse_globaltype(c)?;
                 c.expect_cur(&TokenType::RPAREN)?;
 
                 I.globals.push(id);
                 Ok(ImportDesc::global(gt))
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.6.5
     fn parse_funcs(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::FUNC)?;
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         if c.cur_token_is(&TokenType::LPAREN) {
             match &c.peek_token.r#type {
                 TokenType::IMPORT => {
                     c.expect_cur(&TokenType::LPAREN)?;
                     c.expect_cur(&TokenType::IMPORT)?;
-                    let module_name = Self::parse_name(c)?;
-                    let name = Self::parse_name(c)?;
+                    let r#mod = Self::parse_name(c)?;
+                    let nm = Self::parse_name(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
-                    let (x, _) = Self::parse_typeuse(c, module, I)?;
+                    let (x, I1) = Self::parse_typeuse(c, module, I)?;
                     c.expect_cur(&TokenType::RPAREN)?;
 
-                    I.funcs.push(id);
-                    let funcidx = module.funcs.len() as u32;
-                    module.funcs.push(Func {
-                        r#type: x,
-                        locals: vec![],
-                        body: Expr { instrs: vec![] },
-                    });
                     module.imports.push(Import {
-                        module: module_name,
-                        name: name,
-                        desc: ImportDesc::func(funcidx),
+                        module: r#mod,
+                        name: nm,
+                        desc: ImportDesc::func(x),
                     });
                     Ok(())
                 }
@@ -1375,62 +1598,66 @@ impl ModuleParser {
                                 TokenType::IMPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::IMPORT)?;
-                                    let module = Self::parse_name(c)?;
-                                    let name = Self::parse_name(c)?;
+                                    let r#mod = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::imports(Import {
-                                        module: module,
-                                        name: name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: ImportDesc::func(u32::MAX), // placeholder
                                     }))
                                 }
                                 TokenType::EXPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::EXPORT)?;
-                                    let name = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::exports(Export {
-                                        name: name,
+                                        name: nm,
                                         desc: ExportDesc::func(u32::MAX), // placeholder
                                     }))
                                 }
-                                _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
                             }
                         } else {
+                            let id = Self::get_fresh_id(c, id);
                             let (x, I1) = Self::parse_typeuse(c, module, I)?;
-                            let locals = Self::parse_vec_local(c)?;
-                            let mut I2 = I1.clone();
-                            for local in locals.iter() {
+                            let ts = Self::parse_vec_local(c)?;
+                            let mut I2 = I.clone();
+                            I2.append(&I1);
+                            for local in ts.iter() {
                                 I2.locals.push(local.id.clone());
                             }
-                            let instrs = Self::parse_vec_instr(c, module, &mut I2)?;
+                            let ins = Self::parse_vec_instr(c, module, &mut I2)?;
                             c.expect_cur(&TokenType::RPAREN)?;
 
                             I.funcs.push(id);
                             let funcidx = module.funcs.len() as u32;
                             module.funcs.push(Func {
                                 r#type: x,
-                                locals: locals.iter().map(|local| local.valtype.clone()).collect(),
-                                body: Expr { instrs: instrs },
+                                locals: ts.into_iter().map(|local| local.valtype).collect(),
+                                body: Expr { instrs: ins },
                             });
                             while temp.len() != 0 {
                                 match temp.remove(0) {
                                     ModuleField::imports(Import {
-                                        module: module_name,
-                                        name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: _,
                                     }) => module.imports.push(Import {
-                                        module: module_name,
-                                        name: name,
-                                        desc: ImportDesc::func(funcidx),
+                                        module: r#mod,
+                                        name: nm,
+                                        desc: ImportDesc::func(x),
                                     }),
-                                    ModuleField::exports(Export { name, desc: _ }) => {
+                                    ModuleField::exports(Export { name: nm, desc: _ }) => {
                                         module.exports.push(Export {
-                                            name: name,
+                                            name: nm,
                                             desc: ExportDesc::func(funcidx),
                                         })
                                     }
-                                    _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                    _ => {
+                                        return Err(parser::Error::ParseError(c.cur_token.clone()))
+                                    }
                                 }
                             }
                             return Ok(());
@@ -1440,14 +1667,15 @@ impl ModuleParser {
                 _ => {
                     let (x, I1) = Self::parse_typeuse(c, module, I)?;
                     let locals = Self::parse_vec_local(c)?;
-                    let mut I2 = I1.clone();
+                    let mut I2 = I.clone();
+                    I2.append(&I1);
                     for local in locals.iter() {
                         I2.locals.push(local.id.clone());
                     }
                     let body = Self::parse_vec_instr(c, module, &mut I2)?;
                     c.expect_cur(&TokenType::RPAREN)?;
 
-                    I.types.push(id);
+                    I.funcs.push(id);
                     module.funcs.push(Func {
                         r#type: x,
                         locals: locals.into_iter().map(|local| local.valtype).collect(),
@@ -1458,28 +1686,28 @@ impl ModuleParser {
             }
         } else if c.cur_token_is(&TokenType::RPAREN) {
             c.expect_cur(&TokenType::RPAREN)?;
-            let functype = FuncType {
-                params: vec![],
-                results: vec![],
-            };
-            match I.typedefs.iter().position(|typedef| *typedef == functype) {
-                Some(_) => {}
-                _ => {
-                    I.typedefs.push(functype.clone());
-                    let x = I.typedefs.len() as u32;
-                    module.funcs.push(Func {
-                        r#type: x,
-                        locals: vec![],
-                        body: Expr { instrs: vec![] },
-                    });
-                }
-            }
+            let x = find_or_push_type(
+                &FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+                None,
+                I,
+            );
+
+            // empty func
+            I.funcs.push(id);
+            module.funcs.push(Func {
+                r#type: x,
+                locals: vec![],
+                body: Expr { instrs: vec![] },
+            });
             Ok(())
         } else {
-            Err(ParseError::ParseError(c.cur_token.clone()))
+            Err(parser::Error::ParseError(c.cur_token.clone()))
         }
     }
-    fn parse_vec_local(c: &mut ParseContext) -> Result<Vec<Local>, ParseError> {
+    fn parse_vec_local(c: &mut parser::ParseContext) -> Result<Vec<Local>, parser::Error> {
         let mut locals: Vec<Local> = vec![];
         loop {
             if (!c.cur_token_is(&TokenType::LPAREN)) || (!c.peek_token_is(&TokenType::LOCAL)) {
@@ -1490,10 +1718,10 @@ impl ModuleParser {
         }
         Ok(locals)
     }
-    fn parse_local(c: &mut ParseContext) -> Result<Vec<Local>, ParseError> {
+    fn parse_local(c: &mut parser::ParseContext) -> Result<Vec<Local>, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::LOCAL)?;
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         let mut locals: Vec<Local> = vec![];
         let mut valtypes = Self::parse_vec_valtype(c)?;
         c.expect_cur(&TokenType::RPAREN)?;
@@ -1505,7 +1733,7 @@ impl ModuleParser {
         }
         Ok(locals)
     }
-    fn parse_vec_valtype(c: &mut ParseContext) -> Result<Vec<ValType>, ParseError> {
+    fn parse_vec_valtype(c: &mut parser::ParseContext) -> Result<Vec<ValType>, parser::Error> {
         let mut valtypes: Vec<ValType> = vec![];
         loop {
             if c.cur_token_is(&TokenType::RPAREN) {
@@ -1516,10 +1744,10 @@ impl ModuleParser {
         Ok(valtypes)
     }
     fn parse_vec_instr(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<Vec<Instr>, ParseError> {
+    ) -> Result<Vec<Instr>, parser::Error> {
         let mut instrs: Vec<Instr> = vec![];
         loop {
             if c.cur_token_is(&TokenType::RPAREN) {
@@ -1532,20 +1760,20 @@ impl ModuleParser {
     }
     //6.6.6
     fn parse_tables(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::TABLE)?;
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         if c.cur_token_is(&TokenType::LPAREN) {
             match &c.peek_token.r#type {
                 TokenType::IMPORT => {
                     c.expect_cur(&TokenType::LPAREN)?;
                     c.expect_cur(&TokenType::IMPORT)?;
-                    let module_name = Self::parse_name(c)?;
-                    let name = Self::parse_name(c)?;
+                    let r#mod = Self::parse_name(c)?;
+                    let nm = Self::parse_name(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     let tt = Self::parse_tabletype(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
@@ -1553,8 +1781,8 @@ impl ModuleParser {
                     I.tables.push(id);
                     module.tables.push(Table { r#type: tt.clone() });
                     module.imports.push(Import {
-                        module: module_name,
-                        name: name,
+                        module: r#mod,
+                        name: nm,
                         desc: ImportDesc::table(tt),
                     });
                     Ok(())
@@ -1570,12 +1798,12 @@ impl ModuleParser {
                                 TokenType::IMPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::IMPORT)?;
-                                    let module = Self::parse_name(c)?;
-                                    let name = Self::parse_name(c)?;
+                                    let r#mod = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::imports(Import {
-                                        module: module,
-                                        name: name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: ImportDesc::table(TableType {
                                             limits: Limits { min: 0, max: None },
                                             elemtype: ElemType::FuncRef,
@@ -1585,58 +1813,61 @@ impl ModuleParser {
                                 TokenType::EXPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::EXPORT)?;
-                                    let name = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::exports(Export {
-                                        name: name,
+                                        name: nm,
                                         desc: ExportDesc::table(u32::MAX), //placeholder
                                     }));
                                 }
-                                _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
                             }
                         } else {
                             let tt = Self::parse_tabletype(c)?;
                             c.expect_cur(&TokenType::RPAREN)?;
-                            I.tables.push(id);
-                            let x = I.tables.len() as u32;
-                            module.tables.push(Table { r#type: tt.clone() });
 
+                            I.tables.push(id);
+                            let tableidx = module.tables.len() as u32;
+                            module.tables.push(Table { r#type: tt.clone() });
                             while temp.len() != 0 {
                                 match temp.remove(0) {
                                     ModuleField::imports(Import {
-                                        module: module_name,
-                                        name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: _,
                                     }) => module.imports.push(Import {
-                                        module: module_name,
-                                        name: name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: ImportDesc::table(tt.clone()),
                                     }),
-                                    ModuleField::exports(Export { name, desc: _ }) => {
+                                    ModuleField::exports(Export { name: nm, desc: _ }) => {
                                         module.exports.push(Export {
-                                            name: name,
-                                            desc: ExportDesc::table(x),
+                                            name: nm,
+                                            desc: ExportDesc::table(tableidx),
                                         })
                                     }
-                                    _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                    _ => {
+                                        return Err(parser::Error::ParseError(c.cur_token.clone()))
+                                    }
                                 }
                             }
                             return Ok(());
                         }
                     }
                 }
-                _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
             }
         } else if c.cur_token_is(&TokenType::FUNCREF) {
             let elemtype = Self::parse_elemtype(c)?;
             c.expect_cur(&TokenType::LPAREN)?;
             c.expect_cur(&TokenType::ELEM)?;
-            let funcidxes = Self::parse_vec_funcidx(c, I)?;
-            let n = funcidxes.len() as u32;
+            let xn = Self::parse_vec_funcidx(c, I)?;
+            let n = xn.len() as u32;
             c.expect_cur(&TokenType::RPAREN)?;
             c.expect_cur(&TokenType::RPAREN)?;
 
             I.tables.push(id);
+            let tableidx = module.tables.len() as u32;
             module.tables.push(Table {
                 r#type: TableType {
                     limits: Limits {
@@ -1646,27 +1877,26 @@ impl ModuleParser {
                     elemtype: elemtype,
                 },
             });
-            let x = I.tables.len() as u32;
             module.elem.push(Elem {
-                table: x,
+                table: tableidx,
                 offset: Expr {
                     instrs: vec![Instr::i32_const(0)],
                 },
-                init: funcidxes,
+                init: xn,
             });
             Ok(())
         } else {
-            let tabletype = Self::parse_tabletype(c)?;
+            let tt = Self::parse_tabletype(c)?;
             c.expect_cur(&TokenType::RPAREN)?;
             I.tables.push(id);
-            module.tables.push(Table { r#type: tabletype });
+            module.tables.push(Table { r#type: tt });
             Ok(())
         }
     }
     pub fn parse_vec_funcidx(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         I: &mut IdentifierContext,
-    ) -> Result<Vec<u32>, ParseError> {
+    ) -> Result<Vec<u32>, parser::Error> {
         let mut funcidxes: Vec<u32> = vec![];
         loop {
             if c.cur_token_is(&TokenType::RPAREN) {
@@ -1678,38 +1908,35 @@ impl ModuleParser {
     }
     //6.6.7
     fn parse_mems(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::MEMORY)?;
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         if c.cur_token_is(&TokenType::LPAREN) {
             match &c.peek_token.r#type {
                 TokenType::IMPORT => {
                     c.expect_cur(&TokenType::LPAREN)?;
                     c.expect_cur(&TokenType::IMPORT)?;
-                    let module_name = Self::parse_name(c)?;
-                    let name = Self::parse_name(c)?;
+                    let r#mod = Self::parse_name(c)?;
+                    let nm = Self::parse_name(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
-                    let memtype = Self::parse_memtype(c)?;
+                    let mt = Self::parse_memtype(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
 
                     I.mems.push(id);
-                    module.mems.push(Mem {
-                        r#type: memtype.clone(),
-                    });
+                    module.mems.push(Mem { r#type: mt.clone() });
                     module.imports.push(Import {
-                        module: module_name,
-                        name: name,
-                        desc: ImportDesc::mem(memtype),
+                        module: r#mod,
+                        name: nm,
+                        desc: ImportDesc::mem(mt),
                     });
                     Ok(())
                 }
                 TokenType::EXPORT => {
                     let mut temp: Vec<ModuleField> = vec![];
-                    let mut modulefields: Vec<ModuleField> = vec![];
                     loop {
                         if c.cur_token_is(&TokenType::LPAREN)
                             && (c.peek_token_is(&TokenType::IMPORT)
@@ -1719,57 +1946,57 @@ impl ModuleParser {
                                 TokenType::IMPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::IMPORT)?;
-                                    let module_name = Self::parse_name(c)?;
-                                    let name = Self::parse_name(c)?;
+                                    let r#mod = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::imports(Import {
-                                        module: module_name,
-                                        name: name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: ImportDesc::mem(MemType {
                                             limits: Limits { min: 0, max: None },
-                                        }),
+                                        }), // placeholder
                                     }));
                                 }
                                 TokenType::EXPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::EXPORT)?;
-                                    let name = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::exports(Export {
-                                        name: name,
+                                        name: nm,
                                         desc: ExportDesc::mem(0), //placeholder
                                     }))
                                 }
-                                _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
                             }
                         } else {
-                            let memtype = Self::parse_memtype(c)?;
+                            let mt = Self::parse_memtype(c)?;
                             c.expect_cur(&TokenType::RPAREN)?;
 
                             I.mems.push(id);
-                            let x = I.mems.len() as u32;
-                            module.mems.push(Mem {
-                                r#type: memtype.clone(),
-                            });
+                            let memidx = I.mems.len() as u32;
+                            module.mems.push(Mem { r#type: mt.clone() });
                             while temp.len() != 0 {
                                 match temp.remove(0) {
                                     ModuleField::imports(Import {
-                                        module: module_name,
-                                        name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: _,
                                     }) => module.imports.push(Import {
-                                        module: module_name,
-                                        name,
-                                        desc: ImportDesc::mem(memtype.clone()),
+                                        module: r#mod,
+                                        name: nm,
+                                        desc: ImportDesc::mem(mt.clone()),
                                     }),
 
-                                    ModuleField::exports(Export { name, desc: _ }) => {
+                                    ModuleField::exports(Export { name: nm, desc: _ }) => {
                                         module.exports.push(Export {
-                                            name: name,
-                                            desc: ExportDesc::mem(x),
+                                            name: nm,
+                                            desc: ExportDesc::mem(memidx),
                                         })
                                     }
-                                    _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                    _ => {
+                                        return Err(parser::Error::ParseError(c.cur_token.clone()))
+                                    }
                                 }
                             }
                             return Ok(());
@@ -1807,24 +2034,24 @@ impl ModuleParser {
                     });
                     Ok(())
                 }
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             }
         } else {
-            let memtype = Self::parse_memtype(c)?;
+            let mt = Self::parse_memtype(c)?;
             c.expect_cur(&TokenType::RPAREN)?;
 
             I.mems.push(id);
-            module.mems.push(Mem { r#type: memtype });
+            module.mems.push(Mem { r#type: mt });
             Ok(())
         }
     }
-    pub fn parse_vec_string(c: &mut ParseContext) -> Result<Vec<Vec<u8>>, ParseError> {
+    pub fn parse_vec_string(c: &mut parser::ParseContext) -> Result<Vec<Vec<u8>>, parser::Error> {
         let mut strs: Vec<Vec<u8>> = vec![];
         loop {
             match &c.cur_token.r#type {
                 TokenType::STRING(buf) => {
                     strs.push(buf.to_vec());
-                    c.next_token();
+                    c.next_token()?;
                 }
                 _ => return Ok(strs),
             }
@@ -1832,33 +2059,33 @@ impl ModuleParser {
     }
     //6.6.8
     fn parse_globals(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::GLOBAL)?;
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         if c.cur_token_is(&TokenType::LPAREN) {
             match &c.peek_token.r#type {
                 TokenType::IMPORT => {
                     c.expect_cur(&TokenType::LPAREN)?;
                     c.expect_cur(&TokenType::IMPORT)?;
-                    let module_name = Self::parse_name(c)?;
-                    let name = Self::parse_name(c)?;
+                    let r#mod = Self::parse_name(c)?;
+                    let nm = Self::parse_name(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
-                    let globaltype = Self::parse_globaltype(c)?;
+                    let gt = Self::parse_globaltype(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
 
                     I.globals.push(id);
                     module.globals.push(Global {
-                        r#type: globaltype.clone(),
+                        r#type: gt.clone(),
                         init: Expr { instrs: vec![] },
                     });
                     module.imports.push(Import {
-                        module: module_name,
-                        name: name,
-                        desc: ImportDesc::global(globaltype),
+                        module: r#mod,
+                        name: nm,
+                        desc: ImportDesc::global(gt),
                     });
                     Ok(())
                 }
@@ -1873,12 +2100,12 @@ impl ModuleParser {
                                 TokenType::IMPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::IMPORT)?;
-                                    let module_name = Self::parse_name(c)?;
-                                    let name = Self::parse_name(c)?;
+                                    let r#mod = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::imports(Import {
-                                        module: module_name,
-                                        name: name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: ImportDesc::global(GlobalType {
                                             r#mut: Mut::Const,
                                             valtype: ValType::r#i32,
@@ -1888,44 +2115,46 @@ impl ModuleParser {
                                 TokenType::EXPORT => {
                                     c.expect_cur(&TokenType::LPAREN)?;
                                     c.expect_cur(&TokenType::EXPORT)?;
-                                    let name = Self::parse_name(c)?;
+                                    let nm = Self::parse_name(c)?;
                                     c.expect_cur(&TokenType::RPAREN)?;
                                     temp.push(ModuleField::exports(Export {
-                                        name: name,
+                                        name: nm,
                                         desc: ExportDesc::global(0), //placeholder
                                     }))
                                 }
-                                _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
                             }
                         } else {
-                            let globaltype = Self::parse_globaltype(c)?;
-                            let init = Self::parse_expr(c, module, I)?;
+                            let gt = Self::parse_globaltype(c)?;
+                            let e = Self::parse_expr(c, module, I)?;
                             c.expect_cur(&TokenType::RPAREN)?;
 
                             I.globals.push(id);
-                            let globalidx = I.globals.len() as u32;
+                            let globalidx = module.globals.len() as u32;
                             module.globals.push(Global {
-                                r#type: globaltype.clone(),
-                                init: init,
+                                r#type: gt.clone(),
+                                init: e,
                             });
                             while temp.len() != 0 {
                                 match temp.remove(0) {
                                     ModuleField::imports(Import {
-                                        module: module_name,
-                                        name,
+                                        module: r#mod,
+                                        name: nm,
                                         desc: _,
                                     }) => module.imports.push(Import {
-                                        module: module_name,
-                                        name: name,
-                                        desc: ImportDesc::global(globaltype.clone()),
+                                        module: r#mod,
+                                        name: nm,
+                                        desc: ImportDesc::global(gt.clone()),
                                     }),
-                                    ModuleField::exports(Export { name, desc: _ }) => {
+                                    ModuleField::exports(Export { name: nm, desc: _ }) => {
                                         module.exports.push(Export {
-                                            name: name,
+                                            name: nm,
                                             desc: ExportDesc::global(globalidx),
                                         })
                                     }
-                                    _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                                    _ => {
+                                        return Err(parser::Error::ParseError(c.cur_token.clone()))
+                                    }
                                 }
                             }
                             return Ok(());
@@ -1933,158 +2162,161 @@ impl ModuleParser {
                     }
                 }
                 _ => {
-                    let r#type = Self::parse_globaltype(c)?;
-                    let init = Self::parse_expr(c, module, I)?;
+                    let gt = Self::parse_globaltype(c)?;
+                    let e = Self::parse_expr(c, module, I)?;
                     c.expect_cur(&TokenType::RPAREN)?;
+
                     I.globals.push(id);
                     module.globals.push(Global {
-                        r#type: r#type,
-                        init: init,
+                        r#type: gt,
+                        init: e,
                     });
                     Ok(())
                 }
             }
         } else {
-            let r#type = Self::parse_globaltype(c)?;
-            let init = Self::parse_expr(c, module, I)?;
+            let gt = Self::parse_globaltype(c)?;
+            let e = Self::parse_expr(c, module, I)?;
             c.expect_cur(&TokenType::RPAREN)?;
 
             I.globals.push(id);
             module.globals.push(Global {
-                r#type: r#type,
-                init: init,
+                r#type: gt,
+                init: e,
             });
             Ok(())
         }
     }
     //6.6.9
     fn parse_exports(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::EXPORT)?;
-        let name = Self::parse_name(c)?;
-        let desc = Self::parse_exportdesc(c, I)?;
+        let nm = Self::parse_name(c)?;
+        let d = Self::parse_exportdesc(c, I)?;
 
-        module.exports.push(Export {
-            name: name,
-            desc: desc,
-        });
+        module.exports.push(Export { name: nm, desc: d });
         Ok(())
     }
     fn parse_exportdesc(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         I: &mut IdentifierContext,
-    ) -> Result<ExportDesc, ParseError> {
+    ) -> Result<ExportDesc, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         match &c.cur_token.r#type {
             TokenType::FUNC => {
                 c.expect_cur(&TokenType::FUNC)?;
-                let func = Self::parse_funcidx(c, I)?;
-                Ok(ExportDesc::func(func))
+                let x = Self::parse_funcidx(c, I)?;
+                Ok(ExportDesc::func(x))
             }
             TokenType::TABLE => {
                 c.expect_cur(&TokenType::TABLE)?;
-                let table = Self::parse_tableidx(c, I)?;
-                Ok(ExportDesc::table(table))
+                let x = Self::parse_tableidx(c, I)?;
+                Ok(ExportDesc::table(x))
             }
             TokenType::MEMORY => {
                 c.expect_cur(&TokenType::MEMORY)?;
-                let mem = Self::parse_memidx(c, I)?;
-                Ok(ExportDesc::mem(mem))
+                let x = Self::parse_memidx(c, I)?;
+                Ok(ExportDesc::mem(x))
             }
             TokenType::GLOBAL => {
                 c.expect_cur(&TokenType::GLOBAL)?;
-                let global = Self::parse_globalidx(c, I)?;
-                Ok(ExportDesc::global(global))
+                let x = Self::parse_globalidx(c, I)?;
+                Ok(ExportDesc::global(x))
             }
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     //6.6.10
     fn parse_starts(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::START)?;
-        let funcidx = Self::parse_funcidx(c, I)?;
+        let x = Self::parse_funcidx(c, I)?;
         c.expect_cur(&TokenType::RPAREN)?;
 
-        module.start = Some(Start { func: funcidx });
+        module.start = Some(Start { func: x });
         Ok(())
     }
     //6.6.11
     fn parse_elems(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::ELEM)?;
-        let tableidx = match &c.cur_token.r#type {
+        let x = match &c.cur_token.r#type {
             TokenType::NUM(_) | TokenType::ID(_) => Self::parse_tableidx(c, I)?,
             _ => 0,
         };
-        let offset = if c.cur_token_is(&TokenType::LPAREN) && c.peek_token_is(&TokenType::OFFSET) {
+        let e = if c.cur_token_is(&TokenType::LPAREN) && c.peek_token_is(&TokenType::OFFSET) {
             c.expect_cur(&TokenType::LPAREN)?;
             c.expect_cur(&TokenType::OFFSET)?;
-            let offset = Self::parse_expr(c, module, I)?;
+            let e = Self::parse_expr(c, module, I)?;
             c.expect_cur(&TokenType::RPAREN)?;
-            offset
+            e
         } else {
             Expr {
                 instrs: Self::parse_instr(c, module, I)?,
             }
         };
-        let funcidxes = Self::parse_vec_funcidx(c, I)?;
+        let ys = Self::parse_vec_funcidx(c, I)?;
         c.expect_cur(&TokenType::RPAREN)?;
 
         module.elem.push(Elem {
-            table: tableidx,
-            offset: offset,
-            init: funcidxes,
+            table: x,
+            offset: e,
+            init: ys,
         });
         Ok(())
     }
     //6.6.12
     fn parse_datas(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         c.expect_cur(&TokenType::DATA)?;
-        let memidx = match &c.cur_token.r#type {
+        let x = match &c.cur_token.r#type {
             TokenType::NUM(_) | TokenType::ID(_) => Self::parse_memidx(c, I)?,
             _ => 0,
         };
-        let offset = if c.cur_token_is(&TokenType::LPAREN) && c.peek_token_is(&TokenType::OFFSET) {
+        let e = if c.cur_token_is(&TokenType::LPAREN) && c.peek_token_is(&TokenType::OFFSET) {
             c.expect_cur(&TokenType::LPAREN)?;
             c.expect_cur(&TokenType::OFFSET)?;
-            let offset = Self::parse_expr(c, module, I)?;
+            let e = Self::parse_expr(c, module, I)?;
             c.expect_cur(&TokenType::RPAREN)?;
-            offset
+            e
         } else {
             Expr {
                 instrs: Self::parse_instr(c, module, I)?,
             }
         };
-        let datastring = Self::parse_vec_string(c)?;
+        let bs = Self::parse_vec_string(c)?;
         c.expect_cur(&TokenType::RPAREN)?;
 
         module.data.push(Data {
-            data: memidx,
-            offset: offset,
-            init: datastring.into_iter().flatten().collect(),
+            data: x,
+            offset: e,
+            init: bs.into_iter().flatten().collect(),
         });
         Ok(())
     }
     //6.6.13
-    pub fn parse_module(c: &mut ParseContext) -> Result<(Option<Id>, Module), ParseError> {
+    pub fn parse_module(
+        c: &mut parser::ParseContext,
+    ) -> Result<(Option<Id>, Module), parser::Error> {
+        if c.cur_token_is(&TokenType::EOF) {
+            return Err(parser::Error::Malformed(String::from("unexpected end")));
+        }
         let mut I = IdentifierContext::new();
         let mut module = Module::new();
         let has_module =
@@ -2095,7 +2327,7 @@ impl ModuleParser {
             } else {
                 false
             };
-        let id = Self::parse_id(c);
+        let id = Self::parse_id(c)?;
         loop {
             if !c.cur_token_is(&TokenType::LPAREN) {
                 break;
@@ -2108,10 +2340,10 @@ impl ModuleParser {
         Ok((id, module))
     }
     pub fn parse_modulefield(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut IdentifierContext,
-    ) -> Result<(), ParseError> {
+    ) -> Result<(), parser::Error> {
         match &c.peek_token.r#type {
             TokenType::TYPE => Self::parse_types(c, module, I)?,
             TokenType::IMPORT => Self::parse_imports(c, module, I)?,
@@ -2123,13 +2355,29 @@ impl ModuleParser {
             TokenType::START => Self::parse_starts(c, module, I)?,
             TokenType::ELEM => Self::parse_elems(c, module, I)?,
             TokenType::DATA => Self::parse_datas(c, module, I)?,
-            _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
         }
         Ok(())
     }
+
+    fn process_instr(c: &mut parser::ParseContext, instr: Instr) -> Result<Instr, parser::Error> {
+        c.next_token()?;
+        Ok(instr)
+    }
+    fn get_fresh_id(c: &mut parser::ParseContext, id: Option<Id>) -> Option<Id> {
+        match id {
+            Some(v) => Some(v),
+            _ => {
+                c.cur_new_id += 1;
+                Some(format!("$${}", c.cur_new_id))
+            }
+        }
+    }
 }
-impl Parse<(Option<Id>, Module)> for ModuleParser {
-    fn parse(c: &mut ParseContext) -> std::result::Result<(Option<Id>, Module), ParseError> {
+impl parser::Parse<(Option<Id>, Module)> for ModuleParser {
+    fn parse(
+        c: &mut parser::ParseContext,
+    ) -> std::result::Result<(Option<Id>, Module), parser::Error> {
         Ok(Self::parse_module(c)?)
     }
 }

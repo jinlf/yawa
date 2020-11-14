@@ -1,9 +1,7 @@
 use crate::module::*;
-use crate::parser::*;
+use crate::parser;
 use crate::structure::*;
 use crate::token::*;
-use std::cell::*;
-use std::rc::*;
 
 #[derive(Debug)]
 pub struct Script {
@@ -52,27 +50,27 @@ pub enum Assertion {
     },
     action_trap {
         action: Action,
-        failure: String,
+        failure: Token,
     },
     exhaustion {
         action: Action,
-        failure: String,
+        failure: Token,
     },
     malformed {
         module: ExtModule,
-        failure: String,
+        failure: Token,
     },
     invalid {
         module: ExtModule,
-        failure: String,
+        failure: Token,
     },
     unlinkable {
         module: ExtModule,
-        failure: String,
+        failure: Token,
     },
     module_trap {
         module: ExtModule,
-        failure: String,
+        failure: Token,
     },
 }
 #[derive(Debug, PartialEq)]
@@ -153,9 +151,24 @@ pub enum Meta {
     },
 }
 
+// for debug
+pub trait Locatable {
+    fn position() -> (usize, usize);
+}
+impl Locatable for Action {
+    fn position() -> (usize, usize) {
+        todo!()
+    }
+}
+impl Locatable for ExtModule {
+    fn position() -> (usize, usize) {
+        todo!()
+    }
+}
+
 pub struct ScriptParser {}
 impl ScriptParser {
-    pub fn parse_script(c: &mut ParseContext) -> Result<Script, ParseError> {
+    pub fn parse_script(c: &mut parser::ParseContext) -> Result<Script, parser::Error> {
         let mut cmds: Vec<Cmd> = vec![];
         loop {
             if !c.cur_token_is(&TokenType::LPAREN) {
@@ -165,14 +178,14 @@ impl ScriptParser {
         }
         Ok(Script { cmds: cmds })
     }
-    fn parse_cmd(c: &mut ParseContext) -> Result<Cmd, ParseError> {
+    fn parse_cmd(c: &mut parser::ParseContext) -> Result<Cmd, parser::Error> {
         match &c.peek_token.r#type {
             TokenType::KEYWORD(keyword) => match &keyword[..] {
                 "register" => {
                     c.expect_cur(&TokenType::LPAREN)?;
                     c.expect_cur(&TokenType::KEYWORD("register".to_string()))?;
                     let name = ModuleParser::parse_name(c)?;
-                    let id = ModuleParser::parse_id(c);
+                    let id = ModuleParser::parse_id(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Cmd::register { name: name, id: id })
                 }
@@ -182,7 +195,7 @@ impl ScriptParser {
                     Ok(Cmd::assertion(Self::parse_assertion(c)?))
                 }
                 "script" | "input" | "output" => Ok(Cmd::meta(Self::parse_meta(c)?)),
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             _ => {
                 let extmodule = Self::parse_extmodule(c)?;
@@ -190,7 +203,7 @@ impl ScriptParser {
             }
         }
     }
-    fn parse_extmodule(c: &mut ParseContext) -> Result<ExtModule, ParseError> {
+    fn parse_extmodule(c: &mut parser::ParseContext) -> Result<ExtModule, parser::Error> {
         let has_module =
             if c.cur_token_is(&TokenType::LPAREN) && c.peek_token_is(&TokenType::MODULE) {
                 c.expect_cur(&TokenType::LPAREN)?;
@@ -199,16 +212,16 @@ impl ScriptParser {
             } else {
                 false
             };
-        let id = ModuleParser::parse_id(c);
+        let id = ModuleParser::parse_id(c)?;
         let extmodule = if c.cur_token_is(&TokenType::KEYWORD("binary".to_string())) {
-            c.next_token();
+            c.next_token()?;
             let contents = ModuleParser::parse_vec_string(c)?;
             ExtModule::binary {
                 id: id,
                 contents: contents,
             }
         } else if c.cur_token_is(&TokenType::KEYWORD("quote".to_string())) {
-            c.next_token();
+            c.next_token()?;
             let contents = ModuleParser::parse_vec_string(c)?;
             ExtModule::quote {
                 id: id,
@@ -233,13 +246,13 @@ impl ScriptParser {
         }
         Ok(extmodule)
     }
-    fn parse_action(c: &mut ParseContext) -> Result<Action, ParseError> {
+    fn parse_action(c: &mut parser::ParseContext) -> Result<Action, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => match &keyword[..] {
                 "invoke" => {
                     c.expect_cur(&TokenType::KEYWORD("invoke".to_string()))?;
-                    let id = ModuleParser::parse_id(c);
+                    let id = ModuleParser::parse_id(c)?;
                     let name = ModuleParser::parse_name(c)?;
                     let mut module = Module::new();
                     let mut I = IdentifierContext::new();
@@ -253,21 +266,21 @@ impl ScriptParser {
                 }
                 "get" => {
                     c.expect_cur(&TokenType::KEYWORD("get".to_string()))?;
-                    let id = ModuleParser::parse_id(c);
+                    let id = ModuleParser::parse_id(c)?;
                     let name = ModuleParser::parse_name(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Action::get { id: id, name: name })
                 }
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
     fn parse_vec_expr(
-        c: &mut ParseContext,
+        c: &mut parser::ParseContext,
         module: &mut Module,
         I: &mut crate::module::IdentifierContext,
-    ) -> Result<Vec<Expr>, ParseError> {
+    ) -> Result<Vec<Expr>, parser::Error> {
         let mut exprs: Vec<Expr> = vec![];
         loop {
             if c.cur_token_is(&TokenType::RPAREN) {
@@ -277,8 +290,10 @@ impl ScriptParser {
         }
         Ok(exprs)
     }
-    fn parse_assertion(c: &mut ParseContext) -> Result<Assertion, ParseError> {
+    fn parse_assertion(c: &mut parser::ParseContext) -> Result<Assertion, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
+        let row = c.cur_token.row;
+        let col = c.cur_token.col;
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => match &keyword[..] {
                 "assert_return" => {
@@ -297,7 +312,7 @@ impl ScriptParser {
                         || c.peek_token_is(&TokenType::KEYWORD("get".to_string()))
                     {
                         let action = Self::parse_action(c)?;
-                        let failure = ModuleParser::parse_string(c)?;
+                        let failure = Self::parse_string_token(c)?;
                         c.expect_cur(&TokenType::RPAREN)?;
                         Ok(Assertion::action_trap {
                             action: action,
@@ -305,7 +320,7 @@ impl ScriptParser {
                         })
                     } else {
                         let extmodule = Self::parse_extmodule(c)?;
-                        let failure = ModuleParser::parse_string(c)?;
+                        let failure = Self::parse_string_token(c)?;
                         c.expect_cur(&TokenType::RPAREN)?;
                         Ok(Assertion::module_trap {
                             module: extmodule,
@@ -316,7 +331,7 @@ impl ScriptParser {
                 "assert_exhaustion" => {
                     c.expect_cur(&TokenType::KEYWORD("assert_exhaustion".to_string()))?;
                     let action = Self::parse_action(c)?;
-                    let failure = ModuleParser::parse_string(c)?;
+                    let failure = Self::parse_string_token(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Assertion::exhaustion {
                         action: action,
@@ -326,7 +341,7 @@ impl ScriptParser {
                 "assert_malformed" => {
                     c.expect_cur(&TokenType::KEYWORD("assert_malformed".to_string()))?;
                     let extmodule = Self::parse_extmodule(c)?;
-                    let failure = ModuleParser::parse_string(c)?;
+                    let failure = Self::parse_string_token(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Assertion::malformed {
                         module: extmodule,
@@ -336,7 +351,7 @@ impl ScriptParser {
                 "assert_invalid" => {
                     c.expect_cur(&TokenType::KEYWORD("assert_invalid".to_string()))?;
                     let extmodule = Self::parse_extmodule(c)?;
-                    let failure = ModuleParser::parse_string(c)?;
+                    let failure = Self::parse_string_token(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Assertion::invalid {
                         module: extmodule,
@@ -346,19 +361,21 @@ impl ScriptParser {
                 "assert_unlinkable" => {
                     c.expect_cur(&TokenType::KEYWORD("assert_unlinkable".to_string()))?;
                     let extmodule = Self::parse_extmodule(c)?;
-                    let failure = ModuleParser::parse_string(c)?;
+                    let failure = Self::parse_string_token(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Assertion::unlinkable {
                         module: extmodule,
                         failure: failure,
                     })
                 }
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
-    fn parse_vec_result(c: &mut ParseContext) -> Result<Vec<AssertionResult>, ParseError> {
+    fn parse_vec_result(
+        c: &mut parser::ParseContext,
+    ) -> Result<Vec<AssertionResult>, parser::Error> {
         let mut results: Vec<AssertionResult> = vec![];
         loop {
             match &c.peek_token.r#type {
@@ -399,18 +416,21 @@ impl ScriptParser {
                         )?));
                         c.expect_cur(&TokenType::RPAREN)?;
                     }
-                    _ => return Err(ParseError::ParseError(c.cur_token.clone())),
+                    _ => return Err(parser::Error::ParseError(c.cur_token.clone())),
                 },
                 _ => return Ok(results),
             }
         }
     }
-    fn parse_numpat(c: &mut ParseContext, valtype: ValType) -> Result<NumPat, ParseError> {
+    fn parse_numpat(
+        c: &mut parser::ParseContext,
+        valtype: ValType,
+    ) -> Result<NumPat, parser::Error> {
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => match &keyword[..] {
                 "nan:canonical" => Ok(NumPat::nan_canonical),
                 "nan:arithmetic" => Ok(NumPat::nan_arithmetic),
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
             _ => match valtype {
                 ValType::r#i32 => Ok(NumPat::I32(ModuleParser::parse_i32(c)?)),
@@ -420,13 +440,13 @@ impl ScriptParser {
             },
         }
     }
-    fn parse_meta(c: &mut ParseContext) -> Result<Meta, ParseError> {
+    fn parse_meta(c: &mut parser::ParseContext) -> Result<Meta, parser::Error> {
         c.expect_cur(&TokenType::LPAREN)?;
         match &c.cur_token.r#type {
             TokenType::KEYWORD(keyword) => match &keyword[..] {
                 "script" => {
                     c.expect_cur(&TokenType::KEYWORD("script".to_string()))?;
-                    let id = ModuleParser::parse_id(c);
+                    let id = ModuleParser::parse_id(c)?;
                     let script = Self::parse_script(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Meta::script {
@@ -436,7 +456,7 @@ impl ScriptParser {
                 }
                 "input" => {
                     c.expect_cur(&TokenType::KEYWORD("input".to_string()))?;
-                    let id = ModuleParser::parse_id(c);
+                    let id = ModuleParser::parse_id(c)?;
                     let filename = ModuleParser::parse_name(c)?;
                     c.expect_cur(&TokenType::RPAREN)?;
                     Ok(Meta::input {
@@ -446,7 +466,7 @@ impl ScriptParser {
                 }
                 "output" => {
                     c.expect_cur(&TokenType::KEYWORD("output".to_string()))?;
-                    let id = ModuleParser::parse_id(c);
+                    let id = ModuleParser::parse_id(c)?;
                     let filename = if c.cur_token_is(&TokenType::RPAREN) {
                         None
                     } else {
@@ -458,14 +478,25 @@ impl ScriptParser {
                         filename: filename,
                     })
                 }
-                _ => Err(ParseError::ParseError(c.cur_token.clone())),
+                _ => Err(parser::Error::ParseError(c.cur_token.clone())),
             },
-            _ => Err(ParseError::ParseError(c.cur_token.clone())),
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
+        }
+    }
+
+    pub fn parse_string_token(c: &mut parser::ParseContext) -> Result<Token, parser::Error> {
+        match &c.cur_token.r#type {
+            TokenType::STRING(buf) => {
+                let s = c.cur_token.clone();
+                c.next_token()?;
+                Ok(s)
+            }
+            _ => Err(parser::Error::ParseError(c.cur_token.clone())),
         }
     }
 }
-impl Parse<Script> for ScriptParser {
-    fn parse(c: &mut ParseContext) -> Result<Script, ParseError> {
+impl parser::Parse<Script> for ScriptParser {
+    fn parse(c: &mut parser::ParseContext) -> Result<Script, parser::Error> {
         Ok(Self::parse_script(c)?)
     }
 }
@@ -486,7 +517,7 @@ mod tests {
                         let mut v = Vec::new();
                         f.read_to_end(&mut v).unwrap();
                         let input = String::from_utf8(v).unwrap();
-                        let mut c = ParseContext::new(input);
+                        let mut c = parser::ParseContext::new(input).unwrap();
                         match ScriptParser::parse_script(&mut c) {
                             Ok(s) => println!("{:#?}", s),
                             Err(e) => {
