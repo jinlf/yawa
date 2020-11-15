@@ -40,7 +40,12 @@ impl IdentifierContext {
     }
 }
 
-fn find_or_push_type(ft: &FuncType, id: Option<Id>, I: &mut IdentifierContext) -> u32 {
+fn find_or_push_type(
+    module: &mut Module,
+    ft: &FuncType,
+    id: Option<Id>,
+    I: &mut IdentifierContext,
+) -> u32 {
     match I.typedefs.iter().position(|fuctype| fuctype == ft) {
         Some(p) => {
             match id {
@@ -48,9 +53,10 @@ fn find_or_push_type(ft: &FuncType, id: Option<Id>, I: &mut IdentifierContext) -
                     let index = I.typedefs.len() as u32;
                     I.types.push(id);
                     I.typedefs.push(ft.clone());
+                    module.types.push(ft.clone());
                     return index;
                 }
-                _ => I.types[p] = id,
+                _ => {}
             }
             p as u32
         }
@@ -58,6 +64,7 @@ fn find_or_push_type(ft: &FuncType, id: Option<Id>, I: &mut IdentifierContext) -
             let index = I.typedefs.len() as u32;
             I.types.push(id);
             I.typedefs.push(ft.clone());
+            module.types.push(ft.clone());
             index
         }
     }
@@ -1327,8 +1334,7 @@ impl ModuleParser {
         let ft = Self::parse_functype(c)?;
         c.expect_cur(&TokenType::RPAREN)?;
 
-        let typeidx = find_or_push_type(&ft, id, I);
-        module.types.push(ft);
+        let typeidx = find_or_push_type(module, &ft, id, I);
         Ok(())
     }
     //6.6.3
@@ -1347,6 +1353,7 @@ impl ModuleParser {
                     let ts1 = Self::parse_vec_param(c)?;
                     let ts2 = Self::parse_vec_result(c)?;
                     let x = find_or_push_type(
+                        module,
                         &FuncType {
                             params: ts1.iter().map(|param| param.valtype.clone()).collect(),
                             results: ts2,
@@ -1369,6 +1376,7 @@ impl ModuleParser {
                     let ts1: Vec<Param> = vec![];
                     let ts2 = Self::parse_vec_result(c)?;
                     let x = find_or_push_type(
+                        module,
                         &FuncType {
                             params: ts1.iter().map(|param| param.valtype.clone()).collect(),
                             results: ts2,
@@ -1399,6 +1407,7 @@ impl ModuleParser {
                         c.expect_cur(&TokenType::RPAREN)?;
 
                         let x = find_or_push_type(
+                            module,
                             &FuncType {
                                 params: ts1.iter().map(|param| param.valtype.clone()).collect(),
                                 results: ts2,
@@ -1453,6 +1462,7 @@ impl ModuleParser {
             let ts2: Vec<ValType> = vec![];
 
             let x = find_or_push_type(
+                module,
                 &FuncType {
                     params: ts1.iter().map(|param| param.valtype.clone()).collect(),
                     results: ts2,
@@ -1687,6 +1697,7 @@ impl ModuleParser {
         } else if c.cur_token_is(&TokenType::RPAREN) {
             c.expect_cur(&TokenType::RPAREN)?;
             let x = find_or_push_type(
+                module,
                 &FuncType {
                     params: vec![],
                     results: vec![],

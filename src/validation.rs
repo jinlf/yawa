@@ -29,6 +29,16 @@ impl Context {
             r#return: None,
         }
     }
+    fn push(&mut self, other: &Self) {
+        self.types.append(&mut other.types.clone());
+        self.funcs.append(&mut other.funcs.clone());
+        self.tables.append(&mut other.tables.clone());
+        self.mems.append(&mut other.mems.clone());
+        self.globals.append(&mut other.globals.clone());
+        self.locals.append(&mut other.locals.clone());
+        self.labels.append(&mut other.labels.clone());
+        self.r#return = other.r#return.clone();
+    }
 }
 
 //3.2.1
@@ -89,122 +99,20 @@ fn validate_externtype(externtype: &ExternType) -> Result<(), Error> {
         ExternType::global(globaltype) => Ok(validate_globaltype(globaltype)?),
     }
 }
-fn validate_instr(C: &Context, instr: &Instr) -> Result<(), Error> {
-    match instr {
-        //3.3.1
-        //t.const c
-        Instr::i32_const(_) | Instr::i64_const(_) | Instr::f32_const(_) | Instr::f64_const(_) => {
-            Ok(())
-        }
-        //t.unop
-        Instr::i32_clz
-        | Instr::i32_ctz
-        | Instr::i32_popcnt
-        | Instr::i64_clz
-        | Instr::i64_ctz
-        | Instr::i64_popcnt
-        | Instr::f32_abs
-        | Instr::f32_neg
-        | Instr::f32_sqrt
-        | Instr::f32_ceil
-        | Instr::f32_floor
-        | Instr::f32_trunc
-        | Instr::f32_nearest
-        | Instr::f64_abs
-        | Instr::f64_neg
-        | Instr::f64_sqrt
-        | Instr::f64_ceil
-        | Instr::f64_floor
-        | Instr::f64_trunc
-        | Instr::f64_nearest => Ok(()),
-        //t.binop
-        Instr::i32_add
-        | Instr::i32_sub
-        | Instr::i32_mul
-        | Instr::i32_div_u
-        | Instr::i32_div_s
-        | Instr::i32_rem_u
-        | Instr::i32_rem_s
-        | Instr::i32_and
-        | Instr::i32_or
-        | Instr::i32_xor
-        | Instr::i32_shl
-        | Instr::i32_shr_u
-        | Instr::i32_shr_s
-        | Instr::i32_rotl
-        | Instr::i32_rotr
-        | Instr::i64_add
-        | Instr::i64_sub
-        | Instr::i64_mul
-        | Instr::i64_div_u
-        | Instr::i64_div_s
-        | Instr::i64_rem_u
-        | Instr::i64_rem_s
-        | Instr::i64_and
-        | Instr::i64_or
-        | Instr::i64_xor
-        | Instr::i64_shl
-        | Instr::i64_shr_u
-        | Instr::i64_shr_s
-        | Instr::i64_rotl
-        | Instr::i64_rotr
-        | Instr::f32_add
-        | Instr::f32_sub
-        | Instr::f32_mul
-        | Instr::f32_div
-        | Instr::f32_min
-        | Instr::f32_max
-        | Instr::f32_copysign
-        | Instr::f64_add
-        | Instr::f64_sub
-        | Instr::f64_mul
-        | Instr::f64_div
-        | Instr::f64_min
-        | Instr::f64_max
-        | Instr::f64_copysign => Ok(()),
-        // t.testop
-        Instr::i32_eqz | Instr::i64_eqz => Ok(()),
-
-        // 3.3.4
-        //t.load memarg
-        Instr::i32_load8_s(memarg)
-        | Instr::i32_load8_u(memarg)
-        | Instr::i32_store8(memarg)
-        | Instr::i64_load8_s(memarg)
-        | Instr::i64_load8_u(memarg)
-        | Instr::i64_store8(memarg) => validate_load_store(C, memarg, 8),
-
-        Instr::i32_load16_s(memarg)
-        | Instr::i32_load16_u(memarg)
-        | Instr::i32_store16(memarg)
-        | Instr::i64_load16_s(memarg)
-        | Instr::i64_load16_u(memarg)
-        | Instr::i64_store16(memarg) => validate_load_store(C, memarg, 16),
-
-        Instr::i32_load(memarg)
-        | Instr::f32_load(memarg)
-        | Instr::i32_store(memarg)
-        | Instr::f32_store(memarg)
-        | Instr::i64_load32_s(memarg)
-        | Instr::i64_load32_u(memarg)
-        | Instr::i64_store32(memarg) => validate_load_store(C, memarg, 32),
-
-        Instr::i64_load(memarg)
-        | Instr::f64_load(memarg)
-        | Instr::i64_store(memarg)
-        | Instr::f64_store(memarg) => validate_load_store(C, memarg, 64),
-
-        _ => Ok(()),
-    }
-}
 
 pub fn validate(module: &Module) -> Result<(), Error> {
     let mut functypes = module.types.clone();
     let mut fts = module
         .funcs
         .iter()
-        .map(|func| module.types[func.r#type as usize].clone())
-        .collect();
+        .map(|func| {
+            module
+                .types
+                .get(func.r#type as usize)
+                .cloned()
+                .ok_or(Error::ValidateError(String::from("v3")))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     let mut tts = module
         .tables
         .iter()
@@ -295,7 +203,17 @@ pub fn validate(module: &Module) -> Result<(), Error> {
 }
 
 fn validate_func(C: &Context, func: &Func) -> Result<(), Error> {
-    Ok(validate_expr(C, &func.body)?)
+    let mut validator = Validator::new();
+    let functype = &C.types[func.r#type as usize];
+    validator.push_ctrl(
+        Instr::block {
+            blocktype: BlockType::valtype(None),
+            instrs: vec![],
+        },
+        functype.params.clone(),
+        functype.results.clone(),
+    );
+    Ok(validate_expr(C, &mut validator, &func.body)?)
 }
 fn validate_table(C: &Context, table: &Table) -> Result<(), Error> {
     Ok(())
@@ -318,16 +236,10 @@ fn validate_import(C: &Context, import: &Import) -> Result<(), Error> {
 fn validate_export(C: &Context, export: &Export) -> Result<(), Error> {
     Ok(())
 }
-fn validate_expr(C: &Context, expr: &Expr) -> Result<(), Error> {
-    Ok(validate_instrs(C, &expr.instrs)?)
+fn validate_expr(C: &Context, v: &mut Validator, expr: &Expr) -> Result<(), Error> {
+    validate_instrs(C, v, &expr.instrs)?;
+    Ok(validate_instrs(C, v, &vec![Instr::end])?)
 }
-fn validate_instrs(C: &Context, instrs: &Vec<Instr>) -> Result<(), Error> {
-    for instr in instrs.iter() {
-        validate_instr(C, instr)?;
-    }
-    Ok(())
-}
-
 fn validate_load_store(C: &Context, memarg: &MemArg, N: u32) -> Result<(), Error> {
     if C.mems.len() < 1 {
         return Err(Error::ValidateError(String::from("TODO")));
@@ -338,4 +250,166 @@ fn validate_load_store(C: &Context, memarg: &MemArg, N: u32) -> Result<(), Error
         )));
     }
     Ok(())
+}
+fn validate_instrs(C: &Context, v: &mut Validator, instrs: &Vec<Instr>) -> Result<(), Error> {
+    for instr in instrs.iter() {
+        v.validate_opcode(C, instr)?;
+    }
+    Ok(())
+}
+
+type val_type = ValType;
+
+#[derive(PartialEq)]
+enum stack_item {
+    val_type(val_type),
+    Unknown,
+}
+type opcode = Instr;
+type opd_stack = Vec<stack_item>;
+type ctrl_stack = Vec<ctrl_frame>;
+#[derive(Clone)]
+struct ctrl_frame {
+    opcode: opcode,
+    start_types: Vec<val_type>,
+    end_types: Vec<val_type>,
+    height: usize,
+    unreachable: bool,
+}
+
+struct Validator {
+    opds: opd_stack,
+    ctrls: ctrl_stack,
+}
+impl Validator {
+    fn new() -> Self {
+        Self {
+            opds: vec![],
+            ctrls: vec![],
+        }
+    }
+    fn push_opd(&mut self, r#type: stack_item) {
+        self.opds.push(r#type)
+    }
+    fn pop_opd(&mut self) -> Result<stack_item, Error> {
+        let len = self.ctrls.len();
+        let top = &self.ctrls[len - 1];
+        if self.opds.len() == top.height && top.unreachable {
+            return Ok(stack_item::Unknown);
+        }
+        if self.opds.len() == top.height {
+            return Err(Error::ValidateError(String::from("v1")));
+        }
+        Ok(self.opds.pop().unwrap())
+    }
+    fn pop_opd_expect(&mut self, expect: stack_item) -> Result<stack_item, Error> {
+        let actual = self.pop_opd()?;
+        match actual {
+            stack_item::Unknown => return Ok(expect),
+            _ => {}
+        }
+        match expect {
+            stack_item::Unknown => return Ok(actual),
+            _ => {}
+        }
+        if actual != expect {
+            return Err(Error::ValidateError(String::from("v2")));
+        }
+        Ok(actual)
+    }
+    fn push_opds(&mut self, types: Vec<val_type>) {
+        self.opds.append(
+            &mut types
+                .into_iter()
+                .map(|r#type| stack_item::val_type(r#type))
+                .collect(),
+        );
+    }
+    fn pop_opds(&mut self, types: &Vec<ValType>) -> Result<(), Error> {
+        for t in types.into_iter().rev() {
+            self.pop_opd_expect(stack_item::val_type(t.clone()))?;
+        }
+        Ok(())
+    }
+    fn push_ctrl(&mut self, opcode: opcode, ins: Vec<val_type>, outs: Vec<val_type>) {
+        let frame = ctrl_frame {
+            opcode: opcode,
+            start_types: ins.clone(),
+            end_types: outs,
+            height: self.opds.len(),
+            unreachable: false,
+        };
+        self.ctrls.push(frame);
+        self.push_opds(ins)
+    }
+    fn pop_ctrl(&mut self) -> Result<ctrl_frame, Error> {
+        if self.ctrls.len() == 0 {
+            return Err(Error::ValidateError(String::from("v4")));
+        }
+        let frame = self.ctrls.pop().unwrap();
+        self.pop_opds(&frame.end_types)?;
+        if self.opds.len() != frame.height {
+            return Err(Error::ValidateError(String::from("type mismatch")));
+        }
+        Ok(frame)
+    }
+    fn label_types(frame: ctrl_frame) -> Vec<val_type> {
+        match frame.opcode {
+            Instr::r#loop { .. } => frame.start_types,
+            _ => frame.end_types,
+        }
+    }
+    fn unreachable(&mut self) {
+        let len = self.ctrls.len();
+        let top = &mut self.ctrls[len - 1];
+        self.opds.truncate(top.height);
+        top.unreachable = true;
+    }
+    fn validate_opcode(&mut self, C: &Context, opcode: &opcode) -> Result<(), Error> {
+        match opcode {
+            Instr::nop => {
+                println!();
+            }
+            Instr::i32_const(_) => {
+                self.push_opd(stack_item::val_type(val_type::r#i32));
+            }
+            Instr::i32_add => {
+                self.pop_opd_expect(stack_item::val_type(val_type::r#i32))?;
+                self.pop_opd_expect(stack_item::val_type(val_type::r#i32))?;
+                self.push_opd(stack_item::val_type(val_type::r#i32));
+            }
+            Instr::block { blocktype, instrs } => {
+                let ft = match blocktype {
+                    BlockType::typeidx(typeidx) => C.types[*typeidx as usize].clone(),
+                    BlockType::valtype(valtype) => FuncType {
+                        params: vec![],
+                        results: match valtype {
+                            Some(vt) => vec![vt.clone()],
+                            _ => vec![],
+                        },
+                    },
+                };
+                let ts1 = ft.params;
+                let ts2 = ft.results;
+
+                self.pop_opds(&ts1)?;
+                self.push_ctrl(
+                    Instr::block {
+                        blocktype: blocktype.clone(), //unnecessary
+                        instrs: instrs.clone(),       // unnecessary
+                    },
+                    ts1,
+                    ts2.clone(),
+                );
+            }
+            Instr::end => {
+                let frame = self.pop_ctrl()?;
+                self.push_opds(frame.end_types.clone());
+            }
+            _ => {
+                println!("unimplemented: {:#?}", opcode);
+            }
+        }
+        Ok(())
+    }
 }
